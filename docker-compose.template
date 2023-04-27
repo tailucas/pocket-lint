@@ -1,0 +1,16 @@
+version: "3.8"
+services:
+  app:
+    image: "tailucas/pocket-lint"
+    build: .
+    restart: unless-stopped
+    logging:
+      driver: syslog
+    tmpfs:
+    - /tmp
+    hostname: __DOCKER_HOSTNAME__
+    volumes:
+      - ./data:/data
+      - /dev/log:/dev/log
+    environment:
+      FLASK_ENV: development
