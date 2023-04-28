@@ -3,4 +3,5 @@ set -eu
 set -o pipefail
 
 # Refresh local SQLite
-/opt/app/backup_db.sh
+# TODO: uncomment
+# /opt/app/backup_db.sh
