@@ -8,8 +8,11 @@ RUN apk update \
     && apk --no-cache add \
         gcc \
         musl-dev
+# user scripts
+COPY backup_db.sh .
 # cron jobs
 RUN rm -f ./config/cron/base_job
+COPY config/cron/backup_db ./config/cron/
 # apply override
 RUN /opt/app/app_setup.sh
 # switch to user
