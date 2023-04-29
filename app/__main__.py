@@ -61,6 +61,12 @@ from Crypto.Random import get_random_bytes
 from Crypto.Util.Padding import unpad
 
 
+from sqlalchemy.ext.asyncio import create_async_engine
+db_tablespace = app_config.get('sqlite', 'tablespace_path')
+dburl = f'sqlite+aiosqlite:///{db_tablespace}'
+engine = create_async_engine(dburl)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /start is issued."""
     user = update.effective_user
