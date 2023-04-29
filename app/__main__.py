@@ -25,6 +25,7 @@ class CredsConfig:
     telegram_bot_api_token: f'opitem:"Telegram" opfield:{APP_NAME}.token' = None # type: ignore
     pocket_api_consumer_key: f'opitem:"Pocket" opfield:.credential' = None # type: ignore
     pocket_api_access_token: f'opitem:"Pocket" opfield:user.token' = None # type: ignore
+    aes_sym_key: f'opitem:"AES.{APP_NAME}" opfield:.password' = None # type: ignore
 
 
 # instantiate class
@@ -42,6 +43,8 @@ from pylib.app import AppThread
 from pylib.zmq import zmq_term, Closable
 from pylib.handler import exception_handler
 
+from base64 import b64encode, b64decode
+
 from pocket import Pocket
 
 from requests.adapters import ConnectionError
@@ -49,6 +52,13 @@ from requests.exceptions import RequestException
 
 from telegram import ForceReply, Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+
+# https://www.pycryptodome.org/src/hash/hash
+from Crypto.Hash import SHA384
+# https://www.pycryptodome.org/src/cipher/modern#gcm-mode
+from Crypto.Cipher import AES
+from Crypto.Random import get_random_bytes
+from Crypto.Util.Padding import unpad
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
