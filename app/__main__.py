@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import logging.handlers
 
+import asyncio
 import builtins
 import hashlib
 import simplejson as json
@@ -61,10 +62,51 @@ from Crypto.Random import get_random_bytes
 from Crypto.Util.Padding import unpad
 
 
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import declarative_base, sessionmaker, Session
+
+
 db_tablespace = app_config.get('sqlite', 'tablespace_path')
 dburl = f'sqlite+aiosqlite:///{db_tablespace}'
 engine = create_async_engine(dburl)
+async_session = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+Base = declarative_base()
+
+
+from typing import List, Optional
+from sqlalchemy import Column, Integer, String
+
+
+from sqlalchemy import update
+from sqlalchemy.future import select
+
+
+class Book(Base):
+    __tablename__ = 'books'
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String, nullable=False)
+
+
+class BookDAL():
+    def __init__(self, db_session: Session):
+        self.db_session = db_session
+
+    async def create_book(self, name):
+        new_book = Book(name=name)
+        self.db_session.add(new_book)
+        await self.db_session.flush()
+
+    async def get_all_books(self) -> List[Book]:
+        q = await self.db_session.execute(select(Book).order_by(Book.id))
+        return q.scalars().all()
+
+    async def update_book(self, book_id: int, name: Optional[str]):
+        q = update(Book).where(Book.id == book_id)
+        if name:
+            q = q.values(name=name)
+        q.execution_options(synchronize_session="fetch")
+        await  self.db_session.execute(q)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -83,7 +125,21 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Echo the user message."""
+
+    async with async_session() as session:
+        async with session.begin():
+            book_dal = BookDAL(session)
+            book_name = str(time.time())
+            await book_dal.create_book(name=f'time is {book_name}')
+
     await update.message.reply_text(update.message.text)
+
+
+async def startup():
+    # create db tables
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
 
 
 def main():
@@ -98,12 +154,14 @@ def main():
     #    args=(signal_handler,))
     # startup completed
     # back to INFO logging
+    loop = asyncio.new_event_loop()
     log.setLevel(logging.INFO)
     try:
         #log.info(f'Starting {APP_NAME} threads...')
         #nanny.start()
-        log.info('Startup complete.')
-
+        log.info(f'Starting database at {db_tablespace}...')
+        asyncio.set_event_loop(loop)
+        asyncio.run_coroutine_threadsafe(startup(), loop)
         pocket_access_token = creds.pocket_api_access_token
         consumer_key = creds.pocket_api_consumer_key
         if pocket_access_token is None:
@@ -144,6 +202,7 @@ def main():
     finally:
         die()
         zmq_term()
+        loop.close()
     bye()
 
 
