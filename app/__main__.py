@@ -122,8 +122,9 @@ def main():
         log.info(f'Creating Pocket instance {consumer_key=}, {pocket_access_token=}')
         pocket_instance = Pocket(consumer_key, pocket_access_token)
         log.info(f'Fetching items...')
-        items = pocket_instance.get(count=10, detailType='complete')
-        log.info(f'Items are {items!s}')
+        items = pocket_instance.get(count=1, detailType='simple')
+        real_items = items[0]['list']
+        log.info(f'{real_items}')
 
         """Start the bot."""
         # Create the Application and pass it your bot's token.
