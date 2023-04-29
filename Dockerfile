@@ -6,8 +6,8 @@ USER root
 RUN apk update \
     && apk upgrade \
     && apk --no-cache add \
-        gcc \
-        musl-dev
+        html-xml-utils \
+        sqlite
 # user scripts
 COPY backup_db.sh .
 # cron jobs
