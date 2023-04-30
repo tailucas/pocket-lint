@@ -22,10 +22,11 @@ RUN /opt/app/ngrok_setup.sh
 USER app
 # override configuration
 COPY config/app.conf ./config/app.conf
-COPY config/ngrok_oauth_callback.yml ./config/ngrok_oauth_callback.yml
+COPY config/ngrok_oauth_callback.yml ./
 COPY poetry.lock pyproject.toml ./
 RUN /opt/app/python_setup.sh
 # add the project application
 COPY app/__main__.py ./app/
-# apply override
+# override entrypoint
+COPY app_entrypoint.sh .
 CMD ["/opt/app/entrypoint.sh"]

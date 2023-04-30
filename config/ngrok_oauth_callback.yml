@@ -2,11 +2,11 @@ region: eu
 log_level: info
 log_format: json
 log: false
-web_addr: 0.0.0.0:NGROK_CLIENT_API_PORT
+web_addr: 0.0.0.0:4040
 tunnels:
-    frontend:
+    oauth_callback:
         proto: http
         schemes:
             - https
-        addr: APP_HTTP_PORT
+        addr: 8080
 version: "2"

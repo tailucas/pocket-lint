@@ -12,5 +12,7 @@ services:
     volumes:
       - ./data:/data
       - /dev/log:/dev/log
+    ports:
+      - "4040:4040"
     environment:
       FLASK_ENV: development
