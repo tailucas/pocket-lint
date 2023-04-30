@@ -183,6 +183,23 @@ def main():
         items = pocket_instance.get(count=1, detailType='simple')
         real_items = items[0]['list']
         log.info(f'{real_items}')
+        for item_key, item_data in real_items.items():
+            log.info(f'{item_key=}: {item_data!s}')
+            item_url = item_data['given_url']
+
+        hash_object = SHA384.new(data=bytearray(item_url, encoding='utf-8'))
+        log.info(f'Digest for {item_url} is {hash_object.hexdigest()}')
+
+        header = b"testheader"
+        data = bytearray(item_url, encoding='utf-8')
+        key = b64decode(creds.aes_sym_key)
+        cipher = AES.new(key, AES.MODE_GCM)
+        cipher.update(header)
+        ciphertext, tag = cipher.encrypt_and_digest(data)
+        json_k = [ 'nonce', 'header', 'ciphertext', 'tag' ]
+        json_v = [ b64encode(x).decode('utf-8') for x in (cipher.nonce, header, ciphertext, tag) ]
+        result = json.dumps(dict(zip(json_k, json_v)))
+        log.info(f'Encrypted {result=}')
 
         """Start the bot."""
         # Create the Application and pass it your bot's token.
