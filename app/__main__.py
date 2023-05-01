@@ -30,6 +30,8 @@ class CredsConfig:
     telegram_bot_api_token: f'opitem:"Telegram" opfield:{APP_NAME}.token' = None # type: ignore
     pocket_api_consumer_key: f'opitem:"Pocket" opfield:.credential' = None # type: ignore
     pocket_api_access_token: f'opitem:"Pocket" opfield:user.token' = None # type: ignore
+    pocket_api_request_token: f'opitem:"Pocket" opfield:user.request_token' = None # type: ignore
+    pocket_username: f'opitem:"Pocket" opfield:user.username' = None # type: ignore
     aes_sym_key: f'opitem:"AES.{APP_NAME}" opfield:.password' = None # type: ignore
 
 
@@ -92,18 +94,89 @@ engine = create_async_engine(dburl)
 async_session = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 Base = declarative_base()
 
-
 from typing import List, Optional
-from sqlalchemy import Column, Integer, String
+from sqlalchemy import Column, Integer, String, JSON
 
-
-from sqlalchemy import update
+from sqlalchemy import update, ForeignKey, UniqueConstraint
 from sqlalchemy.future import select
+from sqlalchemy.orm import relationship
+
+def digest(payload):
+    log.info(f'Digest request {payload=}')
+    return SHA384.new(data=bytearray(payload, encoding='utf-8')).hexdigest()
+
+def encrypt(header, payload):
+    log.info(f'Encryption request {header=}, {payload=}')
+    header = bytearray(header, encoding='utf-8')
+    data = bytearray(payload, encoding='utf-8')
+    key = b64decode(creds.aes_sym_key)
+    cipher = AES.new(key, AES.MODE_GCM)
+    cipher.update(header)
+    ciphertext, tag = cipher.encrypt_and_digest(data)
+    json_k = [ 'nonce', 'header', 'ciphertext', 'tag' ]
+    json_v = [ b64encode(x).decode('utf-8') for x in (cipher.nonce, header, ciphertext, tag) ]
+    log.info(f'Encryption complete {json_k=}, {json_v=}')
+    return json.dumps(dict(zip(json_k, json_v)))
+
+
+class User(Base):
+    __tablename__ = 'users'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    telegram_user_id = Column(Integer, index=True, unique=True, nullable=False)
+    pocket_request_token = Column(JSON)
+    pocket_user_name = Column(JSON)
+    pocket_user_name_digest = Column(String(96))
+    pocket_access_token = Column(JSON)
+    pocket_access_token_digest = Column(String(96), unique=True)
+    UniqueConstraint(telegram_user_id, pocket_access_token_digest)
+    links_items = relationship('Item', backref='items', cascade='all, delete-orphan', lazy='dynamic')
+
+
+class Item(Base):
+    __tablename__ = 'items'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('users.id'))
+    item_url_digest = Column(String(96), index=True, unique=True, nullable=False)
+    item_data = Column(JSON)
+
+
+class PocketDB():
+    def __init__(self, db_session: Session):
+        self.db_session = db_session
+        self.loop = asyncio.get_event_loop()
+
+    async def insert_request_token(self, telegram_user_id, pocket_request_token):
+        log.info(f'Insert request token now {telegram_user_id=}, {pocket_request_token=}...')
+        new_user = User(
+            telegram_user_id=telegram_user_id,
+            pocket_request_token=encrypt(str(telegram_user_id), pocket_request_token))
+        self.db_session.add(new_user)
+        await self.db_session.flush()
+
+    async def insert_access_token(self, telegram_user_id, pocket_user_name, pocket_access_token):
+        log.info(f'Insert access token {telegram_user_id=}, ...')
+        q = update(User).where(User.telegram_user_id == telegram_user_id)
+        q = q.values(pocket_user_name=encrypt(str(telegram_user_id), pocket_user_name))
+        q = q.values(pocket_user_name_digest=digest(pocket_user_name))
+        q = q.values(pocket_access_token=encrypt(str(telegram_user_id), pocket_access_token))
+        q = q.values(pocket_access_token_digest=digest(pocket_access_token))
+        q.execution_options(synchronize_session="fetch")
+        await self.db_session.execute(q)
+
+    async def insert_item(self, telegram_user_id, item_data):
+        log.info(f'Insert item {telegram_user_id=}, ...')
+        q = await self.db_session.execute(select(User).where(User.telegram_user_id))
+        user = q.scalars().one()
+        new_item = Item(
+            user_id=user.id,
+            item_url_digest=digest(item_data['given_url']),
+            item_data=encrypt(str(telegram_user_id), json.dumps(item_data)))
+        self.db_session.add(new_item)
+        await self.db_session.flush()
 
 
 class Book(Base):
     __tablename__ = 'books'
-
     id = Column(Integer, primary_key=True)
     name = Column(String, nullable=False)
 
@@ -113,6 +186,7 @@ class BookDAL():
         self.db_session = db_session
 
     async def create_book(self, name):
+        log.info(f'Creating book...')
         new_book = Book(name=name)
         self.db_session.add(new_book)
         await self.db_session.flush()
@@ -201,15 +275,45 @@ async def webhook_update(update: WebhookUpdate, context: CustomContext) -> None:
     )
 
 
-async def startup():
+#async def startup():
+#    log.info('Database startup, creating schema...')
     # create db tables
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-        await conn.run_sync(Base.metadata.create_all)
+#    async with engine.begin() as conn:
+#        await conn.run_sync(Base.metadata.drop_all)
+#        await conn.run_sync(Base.metadata.create_all)
 
 
 async def run(webserver):
     await webserver.serve()
+
+
+async def store_book():
+    async with async_session() as session:
+        async with session.begin():
+            book_dal = BookDAL(session)
+            book_name = str(time.time())
+            await book_dal.create_book(name=f'time is {book_name}')
+
+
+async def store_request_token(telegram_user_id, pocket_request_token):
+    async with async_session() as session:
+        async with session.begin():
+            pocket_db = PocketDB(session)
+            await pocket_db.insert_request_token(telegram_user_id=telegram_user_id, pocket_request_token=pocket_request_token)
+
+
+async def store_access_token(telegram_user_id, pocket_user_name, pocket_access_token):
+    async with async_session() as session:
+        async with session.begin():
+            pocket_db = PocketDB(session)
+            await pocket_db.insert_access_token(telegram_user_id=telegram_user_id, pocket_user_name=pocket_user_name, pocket_access_token=pocket_access_token)
+
+
+async def store_item(telegram_user_id, item_data):
+    async with async_session() as session:
+        async with session.begin():
+            pocket_db = PocketDB(session)
+            await pocket_db.insert_item(telegram_user_id=telegram_user_id, item_data=item_data)
 
 
 def main():
@@ -228,9 +332,11 @@ def main():
             break
         log.info(f'Starting database at {db_tablespace}...')
         asyncio.set_event_loop(loop)
-        asyncio.run_coroutine_threadsafe(startup(), loop)
+        #asyncio.run_coroutine_threadsafe(startup(), loop)
         log.info('Setting up Pocket connection...')
+        pocket_request_token = creds.pocket_api_request_token
         pocket_access_token = creds.pocket_api_access_token
+        username = creds.pocket_username
         consumer_key = creds.pocket_api_consumer_key
         if pocket_access_token is None:
             r_url = 'http://t.me/PocketLintBot'
@@ -251,9 +357,11 @@ def main():
         items = pocket_instance.get(count=1, detailType='simple')
         real_items = items[0]['list']
         log.info(f'{real_items}')
+        real_data = None
         for item_key, item_data in real_items.items():
             log.info(f'{item_key=}: {item_data!s}')
             item_url = item_data['given_url']
+            real_data = item_data
 
         hash_object = SHA384.new(data=bytearray(item_url, encoding='utf-8'))
         log.info(f'Digest for {item_url} is {hash_object.hexdigest()}')
@@ -268,6 +376,17 @@ def main():
         json_v = [ b64encode(x).decode('utf-8') for x in (cipher.nonce, header, ciphertext, tag) ]
         result = json.dumps(dict(zip(json_k, json_v)))
         log.info(f'Encrypted {result=}')
+
+        telegram_user_id=123456
+        log.info(f'Storing request token...')
+        asyncio.run_coroutine_threadsafe(store_request_token(telegram_user_id=telegram_user_id, pocket_request_token=pocket_request_token), loop)
+        log.info(f'Adding book...')
+        asyncio.run_coroutine_threadsafe(store_book(), loop)
+        log.info(f'Storing access token...')
+        username='foobar'
+        asyncio.run_coroutine_threadsafe(store_access_token(telegram_user_id=telegram_user_id, pocket_user_name=username, pocket_access_token=pocket_access_token), loop)
+        log.info(f'Storing item...')
+        asyncio.run_coroutine_threadsafe(store_item(telegram_user_id=telegram_user_id, item_data=real_data), loop)
 
         """Start the bot."""
         # Create the Application and pass it your bot's token.
@@ -330,7 +449,7 @@ def main():
             )
         )
         log.info('Starting web server...')
-        asyncio.run_coroutine_threadsafe(run(webserver), loop)
+        asyncio.run_coroutine_threadsafe(webserver.serve(), loop)
         log.info('Starting Telegram Bot...')
         application.run_polling()
         log.info('Shutting down...')
