@@ -137,7 +137,6 @@ class Item(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey('users.id'))
     item_url_digest = Column(String(96), index=True, unique=True, nullable=False)
-    item_data = Column(JSON)
 
 
 class PocketDB():
@@ -163,16 +162,21 @@ class PocketDB():
         q.execution_options(synchronize_session="fetch")
         await self.db_session.execute(q)
 
-    async def insert_item(self, telegram_user_id, item_data):
+    async def insert_item(self, telegram_user_id, item_url):
         log.info(f'Insert item {telegram_user_id=}, ...')
-        q = await self.db_session.execute(select(User).where(User.telegram_user_id))
+        q = await self.db_session.execute(select(User).where(User.telegram_user_id==telegram_user_id))
         user = q.scalars().one()
         new_item = Item(
             user_id=user.id,
-            item_url_digest=digest(item_data['given_url']),
-            item_data=encrypt(str(telegram_user_id), json.dumps(item_data)))
+            item_url_digest=digest(item_url))
         self.db_session.add(new_item)
         await self.db_session.flush()
+
+    async def get_user_registration(self, telegram_user_id) -> User:
+        # FIXME: use param
+        telegram_user_id=123456
+        q = await self.db_session.execute(select(User).where(User.telegram_user_id==telegram_user_id))
+        return q.scalars().one()
 
 
 class Book(Base):
@@ -235,8 +239,16 @@ class CustomContext(CallbackContext[ExtBot, dict, dict, dict]):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /start is issued."""
     user = update.effective_user
+    log.info(f'Fetching registration info for {user}...')
+    pocket_user = None
+    async with async_session() as session:
+        async with session.begin():
+            pdb = PocketDB(session)
+            pocket_user = await pdb.get_user_registration(telegram_user_id=user)
+            log.info(f'Pocket username digest is {pocket_user.pocket_user_name_digest}')
+    log.info(f'Outside of DB context mgr: {pocket_user.telegram_user_id}')
     await update.message.reply_html(
-        rf"Hi {user.mention_html()}!",
+        rf"Hello {user.mention_html()}",
         reply_markup=ForceReply(selective=True),
     )
 
@@ -248,7 +260,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Echo the user message."""
-    log.info(f'Chat from user ID {update.effective_user.id}.')
+    log.info(f'Incoming message from user ID {update.effective_user.id}.')
     async with async_session() as session:
         async with session.begin():
             book_dal = BookDAL(session)
@@ -256,6 +268,11 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await book_dal.create_book(name=f'time is {book_name}')
 
     await update.message.reply_text(update.message.text)
+
+
+async def telegram_error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # do not capture because there's nothing to handle
+    log.warning(msg="Telegram Bot Exception while handling an update:", exc_info=context.error)
 
 
 async def webhook_update(update: WebhookUpdate, context: CustomContext) -> None:
@@ -275,12 +292,12 @@ async def webhook_update(update: WebhookUpdate, context: CustomContext) -> None:
     )
 
 
-#async def startup():
-#    log.info('Database startup, creating schema...')
+async def startup():
+    log.info('Database startup, creating schema...')
     # create db tables
-#    async with engine.begin() as conn:
-#        await conn.run_sync(Base.metadata.drop_all)
-#        await conn.run_sync(Base.metadata.create_all)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
 
 
 async def run(webserver):
@@ -309,11 +326,11 @@ async def store_access_token(telegram_user_id, pocket_user_name, pocket_access_t
             await pocket_db.insert_access_token(telegram_user_id=telegram_user_id, pocket_user_name=pocket_user_name, pocket_access_token=pocket_access_token)
 
 
-async def store_item(telegram_user_id, item_data):
+async def store_item(telegram_user_id, item_url):
     async with async_session() as session:
         async with session.begin():
             pocket_db = PocketDB(session)
-            await pocket_db.insert_item(telegram_user_id=telegram_user_id, item_data=item_data)
+            await pocket_db.insert_item(telegram_user_id=telegram_user_id, item_url=item_url)
 
 
 def main():
@@ -358,6 +375,7 @@ def main():
         real_items = items[0]['list']
         log.info(f'{real_items}')
         real_data = None
+        item_url = None
         for item_key, item_data in real_items.items():
             log.info(f'{item_key=}: {item_data!s}')
             item_url = item_data['given_url']
@@ -386,7 +404,7 @@ def main():
         username='foobar'
         asyncio.run_coroutine_threadsafe(store_access_token(telegram_user_id=telegram_user_id, pocket_user_name=username, pocket_access_token=pocket_access_token), loop)
         log.info(f'Storing item...')
-        asyncio.run_coroutine_threadsafe(store_item(telegram_user_id=telegram_user_id, item_data=real_data), loop)
+        asyncio.run_coroutine_threadsafe(store_item(telegram_user_id=telegram_user_id, item_url=item_url), loop)
 
         """Start the bot."""
         # Create the Application and pass it your bot's token.
@@ -402,6 +420,9 @@ def main():
         # on non command i.e message - echo the message on Telegram
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
         application.add_handler(TypeHandler(type=WebhookUpdate, callback=webhook_update))
+
+        # error handling
+        application.add_error_handler(callback=telegram_error_handler)
 
 
         async def custom_updates(request: Request) -> PlainTextResponse:
