@@ -3,6 +3,7 @@ import logging.handlers
 
 import asyncio
 import builtins
+import emoji
 import hashlib
 import requests
 import simplejson as json
@@ -57,10 +58,16 @@ from pocket import Pocket
 from requests.adapters import ConnectionError
 from requests.exceptions import RequestException
 
-from telegram import ForceReply, Update
+from telegram import (
+    ForceReply,
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup
+)
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -166,6 +173,7 @@ class PocketDB():
         log.info(f'Insert item {telegram_user_id=}, ...')
         q = await self.db_session.execute(select(User).where(User.telegram_user_id==telegram_user_id))
         user = q.scalars().one()
+        log.info(f'Fetched item {user!s}')
         new_item = Item(
             user_id=user.id,
             item_url_digest=digest(item_url))
@@ -176,7 +184,7 @@ class PocketDB():
         # FIXME: use param
         telegram_user_id=123456
         q = await self.db_session.execute(select(User).where(User.telegram_user_id==telegram_user_id))
-        return q.scalars().one()
+        return q.scalars().one_or_none()
 
 
 class Book(Base):
@@ -244,12 +252,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     async with async_session() as session:
         async with session.begin():
             pdb = PocketDB(session)
-            pocket_user = await pdb.get_user_registration(telegram_user_id=user)
-            log.info(f'Pocket username digest is {pocket_user.pocket_user_name_digest}')
+            pocket_user = await pdb.get_user_registration(telegram_user_id=user.id)
+            log.info(f'{pocket_user=}, {repr(pocket_user)}')
+            #log.info(f'Pocket username digest is {pocket_user.pocket_user_name_digest}')
     log.info(f'Outside of DB context mgr: {pocket_user.telegram_user_id}')
+    emoji_string = emoji.emojize(":thumbsup:", language='alias')
+    log.info(f'Emoji payload is {emoji_string}')
+    keyboard = [
+        [
+            InlineKeyboardButton("Option 1", callback_data="1"),
+            InlineKeyboardButton("Option 2", callback_data="2"),
+        ],
+        [InlineKeyboardButton("Option 3", callback_data="3")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    #await update.message.reply_text("Please choose:", reply_markup=reply_markup)
     await update.message.reply_html(
-        rf"Hello {user.mention_html()}",
-        reply_markup=ForceReply(selective=True),
+        rf"Hello {user.mention_html()} {emoji_string}",
+        #reply_markup=ForceReply(selective=True),
+        reply_markup=reply_markup,
     )
 
 
@@ -268,6 +289,15 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await book_dal.create_book(name=f'time is {book_name}')
 
     await update.message.reply_text(update.message.text)
+
+
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Parses the CallbackQuery and updates the message text."""
+    query = update.callback_query
+    # CallbackQueries need to be answered, even if no notification to the user is needed
+    # Some clients may have trouble otherwise. See https://core.telegram.org/bots/api#callbackquery
+    await query.answer()
+    await query.edit_message_text(text=f"Selected option: {query.data}")
 
 
 async def telegram_error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -298,6 +328,7 @@ async def startup():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
+    log.info('Schema created.')
 
 
 async def run(webserver):
@@ -336,6 +367,7 @@ async def store_item(telegram_user_id, item_url):
 def main():
     log.setLevel(logging.INFO)
     loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
         log.info('Discovering ngrok tunnel URL...')
         while True:
@@ -348,8 +380,7 @@ def main():
             log.info('External call-back URL is {}'.format(ngrok_tunnel_url))
             break
         log.info(f'Starting database at {db_tablespace}...')
-        asyncio.set_event_loop(loop)
-        #asyncio.run_coroutine_threadsafe(startup(), loop)
+        loop.run_until_complete(startup())
         log.info('Setting up Pocket connection...')
         pocket_request_token = creds.pocket_api_request_token
         pocket_access_token = creds.pocket_api_access_token
@@ -397,14 +428,14 @@ def main():
 
         telegram_user_id=123456
         log.info(f'Storing request token...')
-        asyncio.run_coroutine_threadsafe(store_request_token(telegram_user_id=telegram_user_id, pocket_request_token=pocket_request_token), loop)
+        loop.run_until_complete(store_request_token(telegram_user_id=telegram_user_id, pocket_request_token=pocket_request_token))
         log.info(f'Adding book...')
-        asyncio.run_coroutine_threadsafe(store_book(), loop)
+        loop.run_until_complete(store_book())
         log.info(f'Storing access token...')
         username='foobar'
-        asyncio.run_coroutine_threadsafe(store_access_token(telegram_user_id=telegram_user_id, pocket_user_name=username, pocket_access_token=pocket_access_token), loop)
+        loop.run_until_complete(store_access_token(telegram_user_id=telegram_user_id, pocket_user_name=username, pocket_access_token=pocket_access_token))
         log.info(f'Storing item...')
-        asyncio.run_coroutine_threadsafe(store_item(telegram_user_id=telegram_user_id, item_url=item_url), loop)
+        loop.run_until_complete(store_item(telegram_user_id=telegram_user_id, item_url=item_url))
 
         """Start the bot."""
         # Create the Application and pass it your bot's token.
@@ -415,6 +446,7 @@ def main():
         application.bot_data["admin_chat_id"] = 12345
         # on different commands - answer in Telegram
         application.add_handler(CommandHandler("start", start))
+        application.add_handler(CallbackQueryHandler(button))
         application.add_handler(CommandHandler("help", help_command))
 
         # on non command i.e message - echo the message on Telegram
