@@ -62,7 +62,8 @@ from telegram import (
     ForceReply,
     Update,
     InlineKeyboardButton,
-    InlineKeyboardMarkup
+    InlineKeyboardMarkup,
+    User as TelegramUser
 )
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -70,6 +71,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    ConversationHandler,
     MessageHandler,
     filters,
     CallbackContext,
@@ -108,9 +110,15 @@ from sqlalchemy import update, ForeignKey, UniqueConstraint
 from sqlalchemy.future import select
 from sqlalchemy.orm import relationship
 
+
+START_ACTIVITY = 100
+ACTION_AUTHORIZE = 2
+ACTION_NONE = 0
+
 def digest(payload):
     log.info(f'Digest request {payload=}')
     return SHA384.new(data=bytearray(payload, encoding='utf-8')).hexdigest()
+
 
 def encrypt(header, payload):
     log.info(f'Encryption request {header=}, {payload=}')
@@ -126,17 +134,42 @@ def encrypt(header, payload):
     return json.dumps(dict(zip(json_k, json_v)))
 
 
-class User(Base):
+def decrypt(payload):
+    if payload is None:
+        return
+    b64 = json.loads(payload)
+    json_k = [ 'nonce', 'header', 'ciphertext', 'tag' ]
+    jv = {k:b64decode(b64[k]) for k in json_k}
+    key = b64decode(creds.aes_sym_key)
+    cipher = AES.new(key, AES.MODE_GCM, nonce=jv['nonce'])
+    cipher.update(jv['header'])
+    plaintext = cipher.decrypt_and_verify(jv['ciphertext'], jv['tag'])
+    return plaintext.decode('utf-8')
+
+
+class DbUser(Base):
     __tablename__ = 'users'
     id = Column(Integer, primary_key=True, autoincrement=True)
     telegram_user_id = Column(Integer, index=True, unique=True, nullable=False)
     pocket_request_token = Column(JSON)
+    pocket_request_token_digest = Column(String(96))
     pocket_user_name = Column(JSON)
     pocket_user_name_digest = Column(String(96))
     pocket_access_token = Column(JSON)
     pocket_access_token_digest = Column(String(96), unique=True)
     UniqueConstraint(telegram_user_id, pocket_access_token_digest)
     links_items = relationship('Item', backref='items', cascade='all, delete-orphan', lazy='dynamic')
+
+
+class User(object):
+    def __init__(self, db_user: DbUser) -> None:
+        self.telegram_user_id = db_user.telegram_user_id
+        self.pocket_request_token = decrypt(db_user.pocket_request_token)
+        self.pocket_request_token_digest = db_user.pocket_request_token_digest
+        self.pocket_access_token = decrypt(db_user.pocket_access_token)
+        self.pocket_access_token_digest = db_user.pocket_access_token_digest
+        self.pocket_user_name = decrypt(db_user.pocket_user_name)
+        self.pocket_user_name_digest = db_user.pocket_user_name_digest
 
 
 class Item(Base):
@@ -153,7 +186,7 @@ class PocketDB():
 
     async def insert_request_token(self, telegram_user_id, pocket_request_token):
         log.info(f'Insert request token now {telegram_user_id=}, {pocket_request_token=}...')
-        new_user = User(
+        new_user = DbUser(
             telegram_user_id=telegram_user_id,
             pocket_request_token=encrypt(str(telegram_user_id), pocket_request_token))
         self.db_session.add(new_user)
@@ -161,7 +194,7 @@ class PocketDB():
 
     async def insert_access_token(self, telegram_user_id, pocket_user_name, pocket_access_token):
         log.info(f'Insert access token {telegram_user_id=}, ...')
-        q = update(User).where(User.telegram_user_id == telegram_user_id)
+        q = update(DbUser).where(DbUser.telegram_user_id == telegram_user_id)
         q = q.values(pocket_user_name=encrypt(str(telegram_user_id), pocket_user_name))
         q = q.values(pocket_user_name_digest=digest(pocket_user_name))
         q = q.values(pocket_access_token=encrypt(str(telegram_user_id), pocket_access_token))
@@ -171,7 +204,7 @@ class PocketDB():
 
     async def insert_item(self, telegram_user_id, item_url):
         log.info(f'Insert item {telegram_user_id=}, ...')
-        q = await self.db_session.execute(select(User).where(User.telegram_user_id==telegram_user_id))
+        q = await self.db_session.execute(select(DbUser).where(DbUser.telegram_user_id==telegram_user_id))
         user = q.scalars().one()
         log.info(f'Fetched item {user!s}')
         new_item = Item(
@@ -180,11 +213,13 @@ class PocketDB():
         self.db_session.add(new_item)
         await self.db_session.flush()
 
-    async def get_user_registration(self, telegram_user_id) -> User:
-        # FIXME: use param
-        telegram_user_id=123456
-        q = await self.db_session.execute(select(User).where(User.telegram_user_id==telegram_user_id))
-        return q.scalars().one_or_none()
+    async def get_user_registration(self, telegram_user_id) -> DbUser:
+        q = await self.db_session.execute(select(DbUser).where(DbUser.telegram_user_id==telegram_user_id))
+        db_user = q.scalars().one_or_none()
+        if db_user is None:
+            return None
+        else:
+            return User(db_user=db_user)
 
 
 class Book(Base):
@@ -246,32 +281,42 @@ class CustomContext(CallbackContext[ExtBot, dict, dict, dict]):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /start is issued."""
-    user = update.effective_user
-    log.info(f'Fetching registration info for {user}...')
-    pocket_user = None
+    user: TelegramUser = update.effective_user
+    if user.is_bot:
+        log.warning(f'Ignoring bot user {user.id}.')
+        return
+    log.debug(f'Fetching registration data for Telegram user ID {user.id}...')
+    pocket_user: User = None
     async with async_session() as session:
         async with session.begin():
             pdb = PocketDB(session)
             pocket_user = await pdb.get_user_registration(telegram_user_id=user.id)
-            log.info(f'{pocket_user=}, {repr(pocket_user)}')
-            #log.info(f'Pocket username digest is {pocket_user.pocket_user_name_digest}')
-    log.info(f'Outside of DB context mgr: {pocket_user.telegram_user_id}')
-    emoji_string = emoji.emojize(":thumbsup:", language='alias')
-    log.info(f'Emoji payload is {emoji_string}')
-    keyboard = [
-        [
-            InlineKeyboardButton("Option 1", callback_data="1"),
-            InlineKeyboardButton("Option 2", callback_data="2"),
-        ],
-        [InlineKeyboardButton("Option 3", callback_data="3")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    #await update.message.reply_text("Please choose:", reply_markup=reply_markup)
+    user_response = None
+    user_keyboard = []
+    if pocket_user is None:
+        log.debug(f'No database registration found for Telegram user ID {user.id}.')
+        user_response = rf'{emoji.emojize(":passport_control:")} {user.first_name}, authorization with your Pocket account is needed.'
+        user_keyboard = [
+            [
+                InlineKeyboardButton("Authorize", callback_data=str(ACTION_AUTHORIZE)),
+                InlineKeyboardButton("Cancel", callback_data=str(ACTION_NONE))
+            ]
+        ]
+    else:
+        log.debug(f'Found database registration for Telegram user ID {user.id}.')
+        user_response = rf'{emoji.emojize(":check_box_with_check:")} {user.first_name}, you are authorized as Pocket user {pocket_user.pocket_user_name}.'
+        user_keyboard = [
+            [
+                InlineKeyboardButton("Reauthorize", callback_data=str(ACTION_AUTHORIZE)),
+                InlineKeyboardButton("Cancel", callback_data=str(ACTION_NONE))
+            ]
+        ]
+    reply_markup = InlineKeyboardMarkup(user_keyboard)
     await update.message.reply_html(
-        rf"Hello {user.mention_html()} {emoji_string}",
-        #reply_markup=ForceReply(selective=True),
-        reply_markup=reply_markup,
+        text=user_response,
+        reply_markup=reply_markup
     )
+    return START_ACTIVITY
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -298,6 +343,25 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Some clients may have trouble otherwise. See https://core.telegram.org/bots/api#callbackquery
     await query.answer()
     await query.edit_message_text(text=f"Selected option: {query.data}")
+
+
+async def registration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Parses the CallbackQuery and updates the message text."""
+    log.info(f'Registration request from user ID {update.effective_user.id}.')
+    query = update.callback_query
+    # CallbackQueries need to be answered, even if no notification to the user is needed
+    # Some clients may have trouble otherwise. See https://core.telegram.org/bots/api#callbackquery
+    await query.answer()
+    await query.edit_message_text(text=f"Registration selected: {query.data}")
+
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Parses the CallbackQuery and updates the message text."""
+    query = update.callback_query
+    # CallbackQueries need to be answered, even if no notification to the user is needed
+    # Some clients may have trouble otherwise. See https://core.telegram.org/bots/api#callbackquery
+    await query.answer()
+    await query.edit_message_text(text=f"No changes made.")
 
 
 async def telegram_error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -365,7 +429,7 @@ async def store_item(telegram_user_id, item_url):
 
 
 def main():
-    log.setLevel(logging.INFO)
+    log.setLevel(logging.DEBUG)
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
@@ -446,7 +510,8 @@ def main():
         application.bot_data["admin_chat_id"] = 12345
         # on different commands - answer in Telegram
         application.add_handler(CommandHandler("start", start))
-        application.add_handler(CallbackQueryHandler(button))
+        application.add_handler(CallbackQueryHandler(callback=registration, pattern="^" + str(ACTION_AUTHORIZE) + "$"))
+        application.add_handler(CallbackQueryHandler(callback=cancel, pattern="^" + str(ACTION_NONE) + "$"))
         application.add_handler(CommandHandler("help", help_command))
 
         # on non command i.e message - echo the message on Telegram
