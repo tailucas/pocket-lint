@@ -9,6 +9,7 @@ import requests
 import simplejson as json
 import time
 import threading
+import urllib.parse
 
 from collections import deque
 from dataclasses import dataclass
@@ -30,13 +31,14 @@ class CredsConfig:
     cronitor_token: f'opitem:"cronitor" opfield:.password' = None  # type: ignore
     telegram_bot_api_token: f'opitem:"Telegram" opfield:{APP_NAME}.token' = None # type: ignore
     pocket_api_consumer_key: f'opitem:"Pocket" opfield:.credential' = None # type: ignore
-    pocket_api_access_token: f'opitem:"Pocket" opfield:user.token' = None # type: ignore
-    pocket_api_request_token: f'opitem:"Pocket" opfield:user.request_token' = None # type: ignore
-    pocket_username: f'opitem:"Pocket" opfield:user.username' = None # type: ignore
     aes_sym_key: f'opitem:"AES.{APP_NAME}" opfield:.password' = None # type: ignore
     influxdb_org: f'opitem:"InfluxDB" opfield:{influx_creds_section}.org' = None # type: ignore
     influxdb_token: f'opitem:"InfluxDB" opfield:{APP_NAME}.token' = None # type: ignore
     influxdb_url: f'opitem:"InfluxDB" opfield:{influx_creds_section}.url' = None # type: ignore
+    # FIXME: remove
+    pocket_api_access_token: f'opitem:"Pocket" opfield:user.token' = None # type: ignore
+    pocket_api_request_token: f'opitem:"Pocket" opfield:user.request_token' = None # type: ignore
+    pocket_username: f'opitem:"Pocket" opfield:user.username' = None # type: ignore
 
 # instantiate class
 builtins.creds_config = CredsConfig()
@@ -182,6 +184,7 @@ class DbUser(Base):
 class User(object):
     def __init__(self, db_user: DbUser) -> None:
         self.telegram_user_id = db_user.telegram_user_id
+        log.debug(f'Decrypting database details for Telegram user {self.telegram_user_id}.')
         self.pocket_request_token = decrypt(db_user.pocket_request_token)
         self.pocket_request_token_digest = db_user.pocket_request_token_digest
         self.pocket_access_token = decrypt(db_user.pocket_access_token)
@@ -204,10 +207,18 @@ class PocketDB():
 
     async def insert_request_token(self, telegram_user_id, pocket_request_token):
         log.debug(f'Inserting REQUEST token for Telegram user {telegram_user_id}.')
-        new_user = DbUser(
-            telegram_user_id=telegram_user_id,
-            pocket_request_token=encrypt(str(telegram_user_id), pocket_request_token))
-        self.db_session.add(new_user)
+        db_user = await self._get_db_user(telegram_user_id=telegram_user_id)
+        if db_user is None:
+            log.debug(f'Adding new database user information.')
+            db_user = DbUser(
+                telegram_user_id=telegram_user_id,
+                pocket_request_token=encrypt(str(telegram_user_id), pocket_request_token),
+                pocket_request_token_digest=digest(pocket_request_token))
+        else:
+            log.debug(f'Updating database with new token.')
+            db_user.pocket_request_token = encrypt(str(telegram_user_id), pocket_request_token)
+            db_user.pocket_request_token_digest = digest(pocket_request_token)
+        self.db_session.add(db_user)
         await self.db_session.flush()
 
     async def insert_access_token(self, telegram_user_id, pocket_user_name, pocket_access_token):
@@ -218,23 +229,26 @@ class PocketDB():
         q = q.values(pocket_access_token=encrypt(str(telegram_user_id), pocket_access_token))
         q = q.values(pocket_access_token_digest=digest(pocket_access_token))
         q.execution_options(synchronize_session="fetch")
-        await self.db_session.execute(q)
+        return await self.db_session.execute(q)
 
     async def insert_item(self, telegram_user_id, item_url):
         log.debug(f'Inserting item for Telegram user {telegram_user_id}.')
-        q = await self.db_session.execute(select(DbUser).where(DbUser.telegram_user_id==telegram_user_id))
-        user = q.scalars().one()
-        log.debug(f'Fetched DB user ID {user.id} for new item.')
-        new_item = Item(
-            user_id=user.id,
-            item_url_digest=digest(item_url))
-        self.db_session.add(new_item)
-        await self.db_session.flush()
+        db_user = await self._get_db_user(telegram_user_id=telegram_user_id)
+        if db_user is not None:
+            log.debug(f'Fetched DB user ID {db_user.id} for new item.')
+            new_item = Item(
+                user_id=db_user.id,
+                item_url_digest=digest(item_url))
+            self.db_session.add(new_item)
+            await self.db_session.flush()
 
-    async def get_user_registration(self, telegram_user_id) -> DbUser:
-        log.debug(f'Fetching user information for Telegram user {telegram_user_id}.')
+    async def _get_db_user(self, telegram_user_id) -> DbUser:
         q = await self.db_session.execute(select(DbUser).where(DbUser.telegram_user_id==telegram_user_id))
-        db_user = q.scalars().one_or_none()
+        return q.scalars().one_or_none()
+
+    async def get_user_registration(self, telegram_user_id) -> User:
+        log.debug(f'Fetching user information for Telegram user {telegram_user_id}.')
+        db_user = await self._get_db_user(telegram_user_id=telegram_user_id)
         if db_user is None:
             return None
         else:
@@ -366,12 +380,29 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def registration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Parses the CallbackQuery and updates the message text."""
-    log.info(f'Registration request from user ID {update.effective_user.id}.')
+    user: TelegramUser = update.effective_user
+    log.info(f'Registration request from user ID {user.id}.')
     query = update.callback_query
     # CallbackQueries need to be answered, even if no notification to the user is needed
     # Some clients may have trouble otherwise. See https://core.telegram.org/bots/api#callbackquery
     await query.answer()
-    await query.edit_message_text(text=f"Registration selected: {query.data}")
+    log.info(f'Fetching Pocket API request token.')
+    # TODO
+    callback_url_base = context.bot_data["callback_url"]
+    # fetch request token
+    log.info(f'Fetching Pocket API request token, using callback {callback_url_base}.')
+    pocket_request_token = creds.pocket_api_request_token
+    #pocket_request_token = Pocket.get_request_token(consumer_key=consumer_key, redirect_uri=r_url)
+    log.info(f'Storing request token.')
+    await store_request_token(telegram_user_id=user.id, pocket_request_token=pocket_request_token)
+    log.info(f'Using request token for to get the auth URL, using callback {callback_url_base}.')
+    #pocket_auth_url = Pocket.get_auth_url(code=request_token, redirect_uri=redirect_url)
+    redirect_params = urllib.parse.urlencode({'user_id': str(user.id), 'payload': digest(pocket_request_token)})
+    redirect_url = f'{callback_url_base}/oauth_callback?{redirect_params}'
+    # send acknowledgement to customer
+    await query.edit_message_text(
+        text=f'Use [this link]({redirect_url}) to authorize with Pocket.',
+        parse_mode='MarkdownV2')
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -409,7 +440,7 @@ async def startup():
     log.info('Database startup, creating schema...')
     # create db tables
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
+        #await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
     log.info('Schema created.')
 
@@ -533,9 +564,7 @@ def main():
         # Create the Application and pass it your bot's token.
         context_types = ContextTypes(context=CustomContext)
         application = Application.builder().token(creds.telegram_bot_api_token).context_types(context_types).build()
-        application.bot_data["url"] = ngrok_tunnel_url
-        # TODO: fix me
-        application.bot_data["admin_chat_id"] = 12345
+        application.bot_data["callback_url"] = ngrok_tunnel_url
         # on different commands - answer in Telegram
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CallbackQueryHandler(callback=registration, pattern="^" + str(ACTION_AUTHORIZE) + "$"))
@@ -578,12 +607,38 @@ def main():
             """For the health endpoint, reply with a simple plain text message."""
             return PlainTextResponse(content="The bot is still running fine :)")
 
+
+        async def oauth_callback(request: Request) -> PlainTextResponse:
+            """
+            Handle incoming webhook updates by also putting them into the `update_queue` if
+            the required parameters were passed correctly.
+            """
+            log.info(f'Got custom update {request=}')
+            try:
+                user_id = int(request.query_params["user_id"])
+                payload = request.query_params["payload"]
+            except KeyError:
+                return PlainTextResponse(
+                    status_code=HTTPStatus.BAD_REQUEST,
+                    content="Please pass both `user_id` and `payload` as query parameters.",
+                )
+            except ValueError:
+                return PlainTextResponse(
+                    status_code=HTTPStatus.BAD_REQUEST,
+                    content="The `user_id` must be a string!",
+                )
+            log.info(f'Invoking custom update {user_id=}, {payload=}')
+            await application.update_queue.put(WebhookUpdate(user_id=user_id, payload=payload))
+            return PlainTextResponse("Thank you for the submission! It's being forwarded.")
+
+
         # block until exit
         log.info('Setting up web server...')
         starlette_app = Starlette(
             routes=[
                 Route("/ping", health, methods=["GET"]),
                 Route("/submit", custom_updates, methods=["POST", "GET"]),
+                Route("/oauth_callback", oauth_callback, methods=["POST", "GET"]),
             ]
         )
         webserver = CustomServer(
