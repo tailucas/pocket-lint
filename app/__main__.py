@@ -35,7 +35,7 @@ class CredsConfig:
     pocket_username: f'opitem:"Pocket" opfield:user.username' = None # type: ignore
     aes_sym_key: f'opitem:"AES.{APP_NAME}" opfield:.password' = None # type: ignore
     influxdb_org: f'opitem:"InfluxDB" opfield:{influx_creds_section}.org' = None # type: ignore
-    influxdb_token: f'opitem:"InfluxDB" opfield:{influx_creds_section}.token' = None # type: ignore
+    influxdb_token: f'opitem:"InfluxDB" opfield:{APP_NAME}.token' = None # type: ignore
     influxdb_url: f'opitem:"InfluxDB" opfield:{influx_creds_section}.url' = None # type: ignore
 
 # instantiate class
@@ -113,10 +113,10 @@ from sqlalchemy.future import select
 from sqlalchemy.orm import relationship
 
 from influxdb_client import InfluxDBClient, Point, WritePrecision
-from influxdb_client.client.write_api import ASYNCHRONOUS
+from influxdb_client.client.write_api import WriteApi, ASYNCHRONOUS
 
 influxdb_bucket = None
-influxdb_rw = None
+influxdb_rw: WriteApi = None
 
 START_ACTIVITY = 100
 ACTION_AUTHORIZE = 2
@@ -125,6 +125,7 @@ ACTION_NONE = 0
 
 def influxdb_write(point_name, field_name, field_value):
     try:
+        log.debug(f'Writing InfluxDB point {point_name=}, application={APP_NAME}, device={device_name_base}: {field_name}={field_value!s}')
         influxdb_rw.write(
             bucket=influxdb_bucket,
             record=Point(point_name).tag("application", APP_NAME).tag("device", device_name_base).field(field_name, field_value))
@@ -594,7 +595,7 @@ def main():
         )
         log.info('Starting web server...')
         asyncio.run_coroutine_threadsafe(webserver.serve(), loop)
-        influxdb_write("app", "startup", 1)
+        influxdb_write('app', 'startup', 1)
         log.info('Starting Telegram Bot...')
         application.run_polling()
         log.info('Shutting down...')
