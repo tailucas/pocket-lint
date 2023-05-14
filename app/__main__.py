@@ -255,34 +255,6 @@ class PocketDB():
             return User(db_user=db_user)
 
 
-class Book(Base):
-    __tablename__ = 'books'
-    id = Column(Integer, primary_key=True)
-    name = Column(String, nullable=False)
-
-
-class BookDAL():
-    def __init__(self, db_session: Session):
-        self.db_session = db_session
-
-    async def create_book(self, name):
-        log.info(f'Creating book...')
-        new_book = Book(name=name)
-        self.db_session.add(new_book)
-        await self.db_session.flush()
-
-    async def get_all_books(self) -> List[Book]:
-        q = await self.db_session.execute(select(Book).order_by(Book.id))
-        return q.scalars().all()
-
-    async def update_book(self, book_id: int, name: Optional[str]):
-        q = update(Book).where(Book.id == book_id)
-        if name:
-            q = q.values(name=name)
-        q.execution_options(synchronize_session="fetch")
-        await  self.db_session.execute(q)
-
-
 class CustomServer(BaseServer):
     def install_signal_handlers(self) -> None:
         log.warning(f'Server not installing signal handlers.')
@@ -360,12 +332,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Echo the user message."""
     log.info(f'Incoming message from user ID {update.effective_user.id}.')
-    async with async_session() as session:
-        async with session.begin():
-            book_dal = BookDAL(session)
-            book_name = str(time.time())
-            await book_dal.create_book(name=f'time is {book_name}')
-
     await update.message.reply_text(update.message.text)
 
 
@@ -398,11 +364,12 @@ async def registration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     log.info(f'Using request token for to get the auth URL, using callback {callback_url_base}.')
     #pocket_auth_url = Pocket.get_auth_url(code=request_token, redirect_uri=redirect_url)
     redirect_params = urllib.parse.urlencode({'user_id': str(user.id), 'payload': digest(pocket_request_token)})
-    redirect_url = f'{callback_url_base}/oauth_callback?{redirect_params}'
+    redirect_url = f'{callback_url_base}/submit?{redirect_params}'
+    influxdb_write('bot', 'registration_oauth', 1)
     # send acknowledgement to customer
     await query.edit_message_text(
         text=f'Use [this link]({redirect_url}) to authorize with Pocket.',
-        parse_mode='MarkdownV2')
+        parse_mode='Markdown')
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -430,6 +397,7 @@ async def webhook_update(update: WebhookUpdate, context: CustomContext) -> None:
         f"The user {chat_member.user.mention_html()} has sent a new payload. "
         f"So far they have sent the following payloads: \n\n• <code>{combined_payloads}</code>"
     )
+    influxdb_write('bot', 'registration_callback', 1)
     await context.bot.send_message(
         #chat_id=context.bot_data["admin_chat_id"], text=text, parse_mode=ParseMode.HTML
         chat_id=update.user_id, text=text, parse_mode=ParseMode.HTML
@@ -447,14 +415,6 @@ async def startup():
 
 async def run(webserver):
     await webserver.serve()
-
-
-async def store_book():
-    async with async_session() as session:
-        async with session.begin():
-            book_dal = BookDAL(session)
-            book_name = str(time.time())
-            await book_dal.create_book(name=f'time is {book_name}')
 
 
 async def store_request_token(telegram_user_id, pocket_request_token):
@@ -502,63 +462,8 @@ def main():
                 continue
             log.info('External call-back URL is {}'.format(ngrok_tunnel_url))
             break
-        log.info(f'Starting database at {db_tablespace}...')
-        loop.run_until_complete(startup())
-        log.info('Setting up Pocket connection...')
-        pocket_request_token = creds.pocket_api_request_token
-        pocket_access_token = creds.pocket_api_access_token
-        username = creds.pocket_username
-        consumer_key = creds.pocket_api_consumer_key
-        if pocket_access_token is None:
-            r_url = 'http://t.me/PocketLintBot'
-            log.info(f'Fetching request token for {consumer_key=}')
-            request_token = Pocket.get_request_token(consumer_key=consumer_key, redirect_uri=r_url)
-            log.info(f'Using request token for to get auth URL...')
-            auth_url = Pocket.get_auth_url(code=request_token, redirect_uri=r_url)
-            log.info(f'{auth_url=}')
-            time.sleep(30)
-            user_credentials = Pocket.get_credentials(consumer_key=consumer_key, code=request_token)
-            access_token = user_credentials['access_token']
-            username = user_credentials['username']
-            log.info(f'User {username} access token is {access_token}')
-            pocket_access_token = access_token
-        log.info(f'Creating Pocket instance {consumer_key=}, {pocket_access_token=}')
-        pocket_instance = Pocket(consumer_key, pocket_access_token)
-        log.info(f'Fetching items...')
-        items = pocket_instance.get(count=1, detailType='simple')
-        real_items = items[0]['list']
-        log.info(f'{real_items}')
-        real_data = None
-        item_url = None
-        for item_key, item_data in real_items.items():
-            log.info(f'{item_key=}: {item_data!s}')
-            item_url = item_data['given_url']
-            real_data = item_data
-
-        hash_object = SHA384.new(data=bytearray(item_url, encoding='utf-8'))
-        log.info(f'Digest for {item_url} is {hash_object.hexdigest()}')
-
-        header = b"testheader"
-        data = bytearray(item_url, encoding='utf-8')
-        key = b64decode(creds.aes_sym_key)
-        cipher = AES.new(key, AES.MODE_GCM)
-        cipher.update(header)
-        ciphertext, tag = cipher.encrypt_and_digest(data)
-        json_k = [ 'nonce', 'header', 'ciphertext', 'tag' ]
-        json_v = [ b64encode(x).decode('utf-8') for x in (cipher.nonce, header, ciphertext, tag) ]
-        result = json.dumps(dict(zip(json_k, json_v)))
-        log.info(f'Encrypted {result=}')
-
-        telegram_user_id=123456
-        log.info(f'Storing request token...')
-        loop.run_until_complete(store_request_token(telegram_user_id=telegram_user_id, pocket_request_token=pocket_request_token))
-        log.info(f'Adding book...')
-        loop.run_until_complete(store_book())
-        log.info(f'Storing access token...')
-        username='foobar'
-        loop.run_until_complete(store_access_token(telegram_user_id=telegram_user_id, pocket_user_name=username, pocket_access_token=pocket_access_token))
-        log.info(f'Storing item...')
-        loop.run_until_complete(store_item(telegram_user_id=telegram_user_id, item_url=item_url))
+        #log.info(f'Starting database at {db_tablespace}...')
+        #loop.run_until_complete(startup())
 
         """Start the bot."""
         # Create the Application and pass it your bot's token.
@@ -584,6 +489,7 @@ def main():
             Handle incoming webhook updates by also putting them into the `update_queue` if
             the required parameters were passed correctly.
             """
+            influxdb_write('web', 'registration_callback', 1)
             log.info(f'Got custom update {request=}')
             try:
                 user_id = int(request.query_params["user_id"])
@@ -608,37 +514,12 @@ def main():
             return PlainTextResponse(content="The bot is still running fine :)")
 
 
-        async def oauth_callback(request: Request) -> PlainTextResponse:
-            """
-            Handle incoming webhook updates by also putting them into the `update_queue` if
-            the required parameters were passed correctly.
-            """
-            log.info(f'Got custom update {request=}')
-            try:
-                user_id = int(request.query_params["user_id"])
-                payload = request.query_params["payload"]
-            except KeyError:
-                return PlainTextResponse(
-                    status_code=HTTPStatus.BAD_REQUEST,
-                    content="Please pass both `user_id` and `payload` as query parameters.",
-                )
-            except ValueError:
-                return PlainTextResponse(
-                    status_code=HTTPStatus.BAD_REQUEST,
-                    content="The `user_id` must be a string!",
-                )
-            log.info(f'Invoking custom update {user_id=}, {payload=}')
-            await application.update_queue.put(WebhookUpdate(user_id=user_id, payload=payload))
-            return PlainTextResponse("Thank you for the submission! It's being forwarded.")
-
-
         # block until exit
         log.info('Setting up web server...')
         starlette_app = Starlette(
             routes=[
                 Route("/ping", health, methods=["GET"]),
-                Route("/submit", custom_updates, methods=["POST", "GET"]),
-                Route("/oauth_callback", oauth_callback, methods=["POST", "GET"]),
+                Route("/submit", custom_updates, methods=["POST", "GET"])
             ]
         )
         webserver = CustomServer(
