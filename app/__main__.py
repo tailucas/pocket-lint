@@ -203,7 +203,7 @@ class PocketDB():
         self.loop = asyncio.get_event_loop()
 
     async def insert_request_token(self, telegram_user_id, pocket_request_token):
-        log.info(f'Insert request token now {telegram_user_id=}, {pocket_request_token=}...')
+        log.debug(f'Inserting REQUEST token for Telegram user {telegram_user_id}.')
         new_user = DbUser(
             telegram_user_id=telegram_user_id,
             pocket_request_token=encrypt(str(telegram_user_id), pocket_request_token))
@@ -211,7 +211,7 @@ class PocketDB():
         await self.db_session.flush()
 
     async def insert_access_token(self, telegram_user_id, pocket_user_name, pocket_access_token):
-        log.info(f'Insert access token {telegram_user_id=}, ...')
+        log.debug(f'Inserting ACCESS token for Telegram user {telegram_user_id}.')
         q = update(DbUser).where(DbUser.telegram_user_id == telegram_user_id)
         q = q.values(pocket_user_name=encrypt(str(telegram_user_id), pocket_user_name))
         q = q.values(pocket_user_name_digest=digest(pocket_user_name))
@@ -221,10 +221,10 @@ class PocketDB():
         await self.db_session.execute(q)
 
     async def insert_item(self, telegram_user_id, item_url):
-        log.info(f'Insert item {telegram_user_id=}, ...')
+        log.debug(f'Inserting item for Telegram user {telegram_user_id}.')
         q = await self.db_session.execute(select(DbUser).where(DbUser.telegram_user_id==telegram_user_id))
         user = q.scalars().one()
-        log.info(f'Fetched item {user!s}')
+        log.debug(f'Fetched DB user ID {user.id} for new item.')
         new_item = Item(
             user_id=user.id,
             item_url_digest=digest(item_url))
@@ -232,6 +232,7 @@ class PocketDB():
         await self.db_session.flush()
 
     async def get_user_registration(self, telegram_user_id) -> DbUser:
+        log.debug(f'Fetching user information for Telegram user {telegram_user_id}.')
         q = await self.db_session.execute(select(DbUser).where(DbUser.telegram_user_id==telegram_user_id))
         db_user = q.scalars().one_or_none()
         if db_user is None:
