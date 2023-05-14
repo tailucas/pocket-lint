@@ -23,6 +23,7 @@ starlette = "^0.26.1"
 uvicorn = "^0.22.0"
 python-telegram-bot = "^20.2"
 emoji = "^2.2.0"
+influxdb-client = "^1.36.1"
 
 [build-system]
 requires = ["poetry-core"]

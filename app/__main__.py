@@ -23,7 +23,7 @@ import os.path
 # setup builtins used by pylib init
 from . import APP_NAME
 builtins.SENTRY_EXTRAS = []
-
+influx_creds_section = 'local'
 
 class CredsConfig:
     sentry_dsn: f'opitem:"Sentry" opfield:{APP_NAME}.dsn' = None  # type: ignore
@@ -34,7 +34,9 @@ class CredsConfig:
     pocket_api_request_token: f'opitem:"Pocket" opfield:user.request_token' = None # type: ignore
     pocket_username: f'opitem:"Pocket" opfield:user.username' = None # type: ignore
     aes_sym_key: f'opitem:"AES.{APP_NAME}" opfield:.password' = None # type: ignore
-
+    influxdb_org: f'opitem:"InfluxDB" opfield:{influx_creds_section}.org' = None # type: ignore
+    influxdb_token: f'opitem:"InfluxDB" opfield:{influx_creds_section}.token' = None # type: ignore
+    influxdb_url: f'opitem:"InfluxDB" opfield:{influx_creds_section}.url' = None # type: ignore
 
 # instantiate class
 builtins.creds_config = CredsConfig()
@@ -110,10 +112,25 @@ from sqlalchemy import update, ForeignKey, UniqueConstraint
 from sqlalchemy.future import select
 from sqlalchemy.orm import relationship
 
+from influxdb_client import InfluxDBClient, Point, WritePrecision
+from influxdb_client.client.write_api import ASYNCHRONOUS
+
+influxdb_bucket = None
+influxdb_rw = None
 
 START_ACTIVITY = 100
 ACTION_AUTHORIZE = 2
 ACTION_NONE = 0
+
+
+def influxdb_write(point_name, field_name, field_value):
+    try:
+        influxdb_rw.write(
+            bucket=influxdb_bucket,
+            record=Point(point_name).tag("application", APP_NAME).tag("device", device_name_base).field(field_name, field_value))
+    except Exception:
+        log.warning(f'Unable to post to InfluxDB.', exc_info=True)
+
 
 def digest(payload):
     log.info(f'Digest request {payload=}')
@@ -429,10 +446,19 @@ async def store_item(telegram_user_id, item_url):
 
 
 def main():
+    global influxdb_bucket
+    global influxdb_rw
     log.setLevel(logging.DEBUG)
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
+        influxdb_bucket = app_config.get('influxdb', 'bucket')
+        log.info(f'Starting InfluxDB client to {creds.influxdb_url} using bucket {creds.influxdb_org}::{influxdb_bucket}...')
+        influxdb = InfluxDBClient(
+            url=creds.influxdb_url,
+            token=creds.influxdb_token,
+            org=creds.influxdb_org)
+        influxdb_rw = influxdb.write_api(write_options=ASYNCHRONOUS)
         log.info('Discovering ngrok tunnel URL...')
         while True:
             try:
@@ -568,6 +594,7 @@ def main():
         )
         log.info('Starting web server...')
         asyncio.run_coroutine_threadsafe(webserver.serve(), loop)
+        influxdb_write("app", "startup", 1)
         log.info('Starting Telegram Bot...')
         application.run_polling()
         log.info('Shutting down...')
