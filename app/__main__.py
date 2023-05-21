@@ -329,6 +329,78 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(update.message.text)
 
 
+async def pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user: TelegramUser = update.effective_user
+    if user.is_bot:
+        log.warning(f'Ignoring bot user {user.id}.')
+        return
+    log.info(f'/pick for Telegram user ID {user.id}...')
+    pocket_user: User = await get_user_registration(telegram_user_id=user.id)
+    if pocket_user is None or pocket_user.pocket_access_token is None:
+        response_message = rf'{emoji.emojize(":passport_control:")} {user.first_name}, authorization with your Pocket account is needed first. Use /start.'
+    else:
+        pocket_instance = Pocket(creds.pocket_api_consumer_key, pocket_user.pocket_access_token)
+        items = pocket_instance.get(count=1, detailType='simple')
+        real_items = items[0]['list']
+        log.info(f'{real_items}')
+        item_url = None
+        item_title = None
+        for item_key, item_data in real_items.items():
+            log.debug(f'{item_key=}: {item_data!s}')
+            item_url = item_data['given_url']
+            item_title = item_data['given_title']
+        response_message = f'[{item_title}]({item_url})'
+    await update.message.reply_text(
+        text=response_message,
+        parse_mode='Markdown'
+    )
+
+
+async def unread(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user: TelegramUser = update.effective_user
+    if user.is_bot:
+        log.warning(f'Ignoring bot user {user.id}.')
+        return
+    log.info(f'/unread for Telegram user ID {user.id}...')
+    pocket_user: User = await get_user_registration(telegram_user_id=user.id)
+
+
+async def archived(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user: TelegramUser = update.effective_user
+    if user.is_bot:
+        log.warning(f'Ignoring bot user {user.id}.')
+        return
+    log.info(f'/archived for Telegram user ID {user.id}...')
+    pocket_user: User = await get_user_registration(telegram_user_id=user.id)
+
+
+async def favorite(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user: TelegramUser = update.effective_user
+    if user.is_bot:
+        log.warning(f'Ignoring bot user {user.id}.')
+        return
+    log.info(f'/favorite for Telegram user ID {user.id}...')
+    pocket_user: User = await get_user_registration(telegram_user_id=user.id)
+
+
+async def untagged(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user: TelegramUser = update.effective_user
+    if user.is_bot:
+        log.warning(f'Ignoring bot user {user.id}.')
+        return
+    log.info(f'/untagged for Telegram user ID {user.id}...')
+    pocket_user: User = await get_user_registration(telegram_user_id=user.id)
+
+
+async def tagged(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user: TelegramUser = update.effective_user
+    if user.is_bot:
+        log.warning(f'Ignoring bot user {user.id}.')
+        return
+    log.info(f'/tagged for Telegram user ID {user.id}...')
+    pocket_user: User = await get_user_registration(telegram_user_id=user.id)
+
+
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Parses the CallbackQuery and updates the message text."""
     query = update.callback_query
@@ -359,9 +431,11 @@ async def registration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     pocket_auth_url = Pocket.get_auth_url(code=pocket_request_token, redirect_uri=redirect_url)
     log.info(f'Returning pocket authorization URL to Telegram user ID {user.id}.')
     influxdb_write('bot', 'registration_oauth', 1)
-    # send acknowledgement to customer
     await query.edit_message_text(
-        text=f'Use [this link]({pocket_auth_url}) to authorize with Pocket.',
+        text=f'Use [this link]({pocket_auth_url}) to authorize with Pocket. ' \
+            'Please ensure that your mobile browser is already logged into ' \
+            'Pocket before using this link due to a bug in the Pocket web authorization ' \
+            'workflow.',
         parse_mode='Markdown')
 
 
@@ -488,6 +562,13 @@ def main():
         application.add_handler(CallbackQueryHandler(callback=registration, pattern="^" + str(ACTION_AUTHORIZE) + "$"))
         application.add_handler(CallbackQueryHandler(callback=cancel, pattern="^" + str(ACTION_NONE) + "$"))
         application.add_handler(CommandHandler("help", help_command))
+        # pocket commands
+        application.add_handler(CommandHandler("pick", pick))
+        application.add_handler(CommandHandler("unread", unread))
+        application.add_handler(CommandHandler("archived", archived))
+        application.add_handler(CommandHandler("favorite", favorite))
+        application.add_handler(CommandHandler("untagged", untagged))
+        application.add_handler(CommandHandler("tagged", tagged))
 
         # on non command i.e message - echo the message on Telegram
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
