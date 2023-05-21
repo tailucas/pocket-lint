@@ -182,6 +182,7 @@ class DbUser(Base):
 
 class User(object):
     def __init__(self, db_user: DbUser) -> None:
+        self.id = db_user.id
         self.telegram_user_id = db_user.telegram_user_id
         log.debug(f'Decrypting database details for Telegram user {self.telegram_user_id}.')
         self.pocket_request_token = decrypt(db_user.pocket_request_token)
@@ -196,7 +197,7 @@ class Item(Base):
     __tablename__ = 'items'
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey('users.id'))
-    item_url_digest = Column(String(96), index=True, unique=True, nullable=False)
+    last_offset = Column(Integer, default=0)
 
 
 class PocketDB():
@@ -230,16 +231,24 @@ class PocketDB():
         q.execution_options(synchronize_session="fetch")
         return await self.db_session.execute(q)
 
-    async def insert_item(self, telegram_user_id, item_url):
+    async def insert_item(self, telegram_user_id, offset):
         log.debug(f'Inserting item for Telegram user {telegram_user_id}.')
         db_user = await self._get_db_user(telegram_user_id=telegram_user_id)
         if db_user is not None:
             log.debug(f'Fetched DB user ID {db_user.id} for new item.')
-            new_item = Item(
-                user_id=db_user.id,
-                item_url_digest=digest(item_url))
-            self.db_session.add(new_item)
+            db_item = await self._get_db_item(user_id=db_user.id)
+            if db_item is None:
+                db_item = Item(user_id=db_user.id, last_offset=offset)
+            else:
+                db_item.last_offset = offset
+            self.db_session.add(db_item)
             await self.db_session.flush()
+        else:
+            log.warning(f'No DB user to support item for Telegram user ID {telegram_user_id}, {offset=}')
+
+    async def _get_db_item(self, user_id) -> Item:
+        q = await self.db_session.execute(select(Item).where(Item.user_id==user_id))
+        return q.scalars().one_or_none()
 
     async def _get_db_user(self, telegram_user_id) -> DbUser:
         q = await self.db_session.execute(select(DbUser).where(DbUser.telegram_user_id==telegram_user_id))
@@ -339,8 +348,13 @@ async def pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if pocket_user is None or pocket_user.pocket_access_token is None:
         response_message = rf'{emoji.emojize(":passport_control:")} {user.first_name}, authorization with your Pocket account is needed first. Use /start.'
     else:
+        offset = 0
+        user_item: Item = await get_item(pocket_user.id)
+        if user_item is not None:
+            offset = user_item.last_offset+1
+        log.debug(f'Fetching item using {offset}')
         pocket_instance = Pocket(creds.pocket_api_consumer_key, pocket_user.pocket_access_token)
-        items = pocket_instance.get(detailType='complete', count=2, offset=4)
+        items = pocket_instance.get(detailType='complete', count=1, offset=offset)
         log.debug(f'Pocket response {items!s}')
         real_items = items[0]['list']
         item_url = None
@@ -352,6 +366,8 @@ async def pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             item_title = item_data['given_title']
             item_detail = item_data['excerpt']
         response_message = rf'<a href="{item_url}">{item_title}</a>: {item_detail}'
+        log.debug(f'Saving offset to DB {offset=}')
+        await store_item(telegram_user_id=pocket_user.telegram_user_id, offset=offset)
     # FIXME: Use Markdown when escape function works consistency with inputs
     await update.message.reply_text(
         text=response_message,
@@ -508,6 +524,13 @@ async def get_user_registration(telegram_user_id):
             return await pdb.get_user_registration(telegram_user_id=telegram_user_id)
 
 
+async def get_item(user_id):
+    async with async_session() as session:
+        async with session.begin():
+            pdb = PocketDB(session)
+            return await pdb._get_db_item(user_id=user_id)
+
+
 async def store_request_token(telegram_user_id, pocket_request_token):
     async with async_session() as session:
         async with session.begin():
@@ -522,11 +545,11 @@ async def store_access_token(telegram_user_id, pocket_username, pocket_access_to
             await pocket_db.insert_access_token(telegram_user_id=telegram_user_id, pocket_username=pocket_username, pocket_access_token=pocket_access_token)
 
 
-async def store_item(telegram_user_id, item_url):
+async def store_item(telegram_user_id, offset):
     async with async_session() as session:
         async with session.begin():
             pocket_db = PocketDB(session)
-            await pocket_db.insert_item(telegram_user_id=telegram_user_id, item_url=item_url)
+            await pocket_db.insert_item(telegram_user_id=telegram_user_id, offset=offset)
 
 
 def main():
