@@ -96,7 +96,7 @@ from http import HTTPStatus
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import PlainTextResponse, Response
+from starlette.responses import PlainTextResponse, Response, RedirectResponse
 from starlette.routing import Route
 
 db_tablespace = app_config.get('sqlite', 'tablespace_path')
@@ -518,7 +518,7 @@ def main():
                 )
             log.debug(f'Invoking custom update {user_id=}')
             await application.update_queue.put(WebhookUpdate(user_id=user_id))
-            return PlainTextResponse("Thank you for the submission! It's being forwarded.")
+            return RedirectResponse(url=app_config.get('telegram', 'bot_link'))
 
 
         async def health(_: Request) -> PlainTextResponse:
