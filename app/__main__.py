@@ -80,6 +80,7 @@ from telegram.ext import (
     ExtBot,
     TypeHandler
 )
+from telegram.helpers import escape_markdown
 
 # https://www.pycryptodome.org/src/hash/hash
 from Crypto.Hash import SHA384
@@ -287,7 +288,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if user.is_bot:
         log.warning(f'Ignoring bot user {user.id}.')
         return
-    log.info(f'Fetching registration data for Telegram user ID {user.id}...')
+    log.info(f'Fetching registration data for Telegram user ID {user.id} (language {user.language_code}).')
     pocket_user: User = await get_user_registration(telegram_user_id=user.id)
     user_response = None
     user_keyboard = []
@@ -312,7 +313,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     reply_markup = InlineKeyboardMarkup(user_keyboard)
     await update.message.reply_html(
         text=user_response,
-        disable_web_page_preview=True,
         reply_markup=reply_markup
     )
     return START_ACTIVITY
@@ -340,19 +340,22 @@ async def pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         response_message = rf'{emoji.emojize(":passport_control:")} {user.first_name}, authorization with your Pocket account is needed first. Use /start.'
     else:
         pocket_instance = Pocket(creds.pocket_api_consumer_key, pocket_user.pocket_access_token)
-        items = pocket_instance.get(count=1, detailType='simple')
+        items = pocket_instance.get(detailType='complete', count=2, offset=4)
+        log.debug(f'Pocket response {items!s}')
         real_items = items[0]['list']
-        log.info(f'{real_items}')
         item_url = None
         item_title = None
+        item_detail = None
         for item_key, item_data in real_items.items():
             log.debug(f'{item_key=}: {item_data!s}')
             item_url = item_data['given_url']
             item_title = item_data['given_title']
-        response_message = f'[{item_title}]({item_url})'
+            item_detail = item_data['excerpt']
+        response_message = rf'<a href="{item_url}">{item_title}</a>: {item_detail}'
+    # FIXME: Use Markdown when escape function works consistency with inputs
     await update.message.reply_text(
         text=response_message,
-        parse_mode='Markdown'
+        parse_mode=ParseMode.HTML
     )
 
 
@@ -436,7 +439,7 @@ async def registration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             'Please ensure that your mobile browser is already logged into ' \
             'Pocket before using this link due to a bug in the Pocket web authorization ' \
             'workflow.',
-        parse_mode='Markdown')
+        parse_mode=ParseMode.MARKDOWN)
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -481,7 +484,7 @@ async def webhook_update(update: WebhookUpdate, context: CustomContext) -> None:
         await context.bot.send_message(
             chat_id=update.user_id,
             text=response_message,
-            parse_mode=ParseMode.HTML
+            parse_mode=ParseMode.MARKDOWN
         )
 
 
