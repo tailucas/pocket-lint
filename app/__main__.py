@@ -360,12 +360,30 @@ async def pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         item_url = None
         item_title = None
         item_detail = None
+        item_read_time = None
+        item_tags = None
         for item_key, item_data in real_items.items():
             log.debug(f'{item_key=}: {item_data!s}')
             item_url = item_data['given_url']
-            item_title = item_data['given_title']
-            item_detail = item_data['excerpt']
-        response_message = rf'<a href="{item_url}">{item_title}</a>: {item_detail}'
+            if 'given_title' in item_data.keys():
+                item_title = item_data['given_title']
+            if 'excerpt' in item_data.keys():
+                item_detail = item_data['excerpt']
+            if 'time_to_read' in item_data.keys():
+                item_read_time = item_data['time_to_read']
+            if 'tags' in item_data.keys():
+                item_tags = item_data['tags'].keys()
+        if item_title:
+            response_message = rf'<a href="{item_url}">{item_title}</a>'
+            if item_detail:
+                response_message += rf': <i>{item_detail}</i>'
+            if item_read_time:
+                response_message += rf' ({item_read_time} minute read)'
+            if item_tags:
+                tag_list = ', '.join(sorted(item_tags))
+                response_message += rf' tags: <b>{tag_list}</b>'
+        else:
+            response_message = rf'{item_url}'
         log.debug(f'Saving offset to DB {offset=}')
         await store_item(telegram_user_id=pocket_user.telegram_user_id, offset=offset)
     # FIXME: Use Markdown when escape function works consistency with inputs
