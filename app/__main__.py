@@ -121,8 +121,11 @@ influxdb_rw: WriteApi = None
 
 START_ACTIVITY = 100
 CONFIGURE_ACTIVITY = 200
-ACTION_CONFIGURE_SORT_OLD = 4
-ACTION_CONFIGURE_SORT_NEW = 3
+ACTION_SETTINGS_PREFIX = "settings"
+SORT_NEWEST = 1
+ACTION_SETTINGS_SORT_NEWEST = f'{ACTION_SETTINGS_PREFIX}_sort_{SORT_NEWEST}'
+SORT_OLDEST = 0
+ACTION_SETTINGS_SORT_OLDEST = f'{ACTION_SETTINGS_PREFIX}_sort_{SORT_OLDEST}'
 ACTION_AUTHORIZE = 2
 ACTION_NONE = 0
 
@@ -201,6 +204,13 @@ class User(object):
         self.pocket_username_digest = db_user.pocket_username_digest
 
 
+class DbUserPref(Base):
+    __tablename__ = 'user_prefs'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('users.id'), index=True)
+    sort_order = Column(Integer, default=SORT_NEWEST)
+
+
 class DbItem(Base):
     __tablename__ = 'items'
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -267,9 +277,35 @@ class PocketDB():
         else:
             log.warning(f'No DB user to support item for Telegram user ID {telegram_user_id}, {offset=}')
 
+
+    async def update_user_pref(self, telegram_user_id, sort_order):
+        log.debug(f'Updating preference for Telegram user {telegram_user_id}: {sort_order=}.')
+        db_user = await self._get_db_user(telegram_user_id=telegram_user_id)
+        if db_user is not None:
+            log.debug(f'Fetched DB user ID {db_user.id} for preference update {sort_order=}.')
+            db_pref = await self._get_db_user_pref(user_id=db_user.id)
+            if db_pref is None:
+                db_pref = DbUserPref(user_id=db_user.id, sort_order=sort_order)
+            else:
+                db_pref.sort_order = sort_order
+            self.db_session.add(db_pref)
+            await self.db_session.flush()
+            # reset offsets
+            await self._reset_pick_offset(user_id=db_user.id)
+        else:
+            log.warning(f'No DB user to support item for Telegram user ID {telegram_user_id}, {sort_order=}')
+
+
     async def _get_db_item(self, user_id) -> DbItem:
         q = await self.db_session.execute(select(DbItem).where(DbItem.user_id==user_id))
         return q.scalars().one_or_none()
+
+    async def _reset_pick_offset(self, user_id) -> None:
+        log.debug(f'Resetting pick offsets for DB user {user_id}')
+        q = update(DbPickOffset).where(DbPickOffset.user_id == user_id)
+        q = q.values(offset=0)
+        q.execution_options(synchronize_session="fetch")
+        return await self.db_session.execute(q)
 
     async def _get_db_pick_offset(self, user_id, pick_type, tag_digest) -> DbPickOffset:
         where_condition = (
@@ -279,6 +315,11 @@ class PocketDB():
         )
         log.debug(f'Fetching {pick_type=} offset for DB user {user_id} with tag digest {tag_digest}')
         q = await self.db_session.execute(select(DbPickOffset).where(where_condition))
+        return q.scalars().one_or_none()
+
+    async def _get_db_user_pref(self, user_id) -> DbUserPref:
+        log.debug(f'Fetching preference for DB user {user_id}')
+        q = await self.db_session.execute(select(DbUserPref).where(DbUserPref.user_id==user_id))
         return q.scalars().one_or_none()
 
     async def _get_db_user(self, telegram_user_id) -> DbUser:
@@ -374,11 +415,11 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
     else:
         log.info(f'Found database registration for Telegram user ID {user.id}.')
-        response_message = rf'{emoji.emojize(":gear:")} {user.first_name}, which sort order do you want first? Changing this will reset your pick positions.'
+        response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":gear:")}</tg-emoji> {user.first_name}, pick your sort order. <tg-emoji emoji-id="2">{emoji.emojize(":warning:")}</tg-emoji> <b>Note:</b> Changing this will reset your pick positions.'
         user_keyboard = [
             [
-                InlineKeyboardButton("Newest", callback_data=str(ACTION_CONFIGURE_SORT_NEW)),
-                InlineKeyboardButton("Oldest", callback_data=str(ACTION_CONFIGURE_SORT_OLD))
+                InlineKeyboardButton("Newest", callback_data=ACTION_SETTINGS_SORT_NEWEST),
+                InlineKeyboardButton("Oldest", callback_data=ACTION_SETTINGS_SORT_OLDEST)
             ],
             [
                 InlineKeyboardButton("Cancel", callback_data=str(ACTION_NONE))
@@ -412,17 +453,18 @@ async def pick_from_pocket(telegram_user_id, telegram_user_first_name, pick_type
         db_offset: DbPickOffset = await get_offset(user_id=pocket_user.id, pick_type=pick_type, tag=tag)
         if db_offset is not None:
             offset = db_offset.offset+1
-        log.debug(f'Fetching item {pick_type=} using {offset=}')
+        sort_order = await get_sort_order(user_id=pocket_user.id)
+        log.debug(f'Fetching item {pick_type=} using {offset=}, {sort_order=}')
         pocket_instance = Pocket(creds.pocket_api_consumer_key, pocket_user.pocket_access_token)
         # FIXME: bit masking
         if pick_type == PICK_TYPE_ARCHIVED:
-            items = pocket_instance.get(state='archive', detailType='complete', count=1, offset=offset)
+            items = pocket_instance.get(state='archive', sort=sort_order, detailType='complete', count=1, offset=offset)
         elif pick_type == PICK_TYPE_FAVORITE:
-            items = pocket_instance.get(favorite=1, detailType='complete', count=1, offset=offset)
+            items = pocket_instance.get(favorite=1, sort=sort_order, detailType='complete', count=1, offset=offset)
         elif pick_type == PICK_TYPE_TAGGING:
-            items = pocket_instance.get(tag=tag, detailType='complete', count=1, offset=offset)
+            items = pocket_instance.get(tag=tag, sort=sort_order, detailType='complete', count=1, offset=offset)
         else:
-            items = pocket_instance.get(detailType='complete', count=1, offset=offset)
+            items = pocket_instance.get(sort=sort_order, detailType='complete', count=1, offset=offset)
         if len(items) == 0 or len(items[0]['list']) == 0:
             response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":floppy_disk:")}</tg-emoji> No links found, sorry.'
         else:
@@ -551,6 +593,28 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Some clients may have trouble otherwise. See https://core.telegram.org/bots/api#callbackquery
     await query.answer()
     await query.edit_message_text(text=f"Selected option: {query.data}")
+
+
+async def configure(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Parses the CallbackQuery and updates the message text."""
+    user: TelegramUser = update.effective_user
+    log.info(f'Registration request from Telegram user ID {user.id}.')
+    query = update.callback_query
+    # CallbackQueries need to be answered, even if no notification to the user is needed
+    # Some clients may have trouble otherwise. See https://core.telegram.org/bots/api#callbackquery
+    await query.answer()
+    user_selection = query.data
+    log.debug(f'Telegram user ID {user.id} preference update {user_selection=}')
+    if user_selection == ACTION_SETTINGS_SORT_NEWEST:
+        await update_user_pref(telegram_user_id=user.id, sort_order=SORT_NEWEST)
+    elif user_selection == ACTION_SETTINGS_SORT_OLDEST:
+        await update_user_pref(telegram_user_id=user.id, sort_order=SORT_OLDEST)
+    else:
+        log.warning(f'Telegram user ID {user.id} has specified an invalid preference {user_selection=}')
+    influxdb_write('bot', 'settings_updated', 1)
+    await query.edit_message_text(
+        text=f'{emoji.emojize(":check_mark_button:")} Settings updated.',
+        parse_mode=ParseMode.MARKDOWN)
 
 
 async def registration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -686,6 +750,27 @@ async def update_offset(telegram_user_id, pick_type, tag, offset):
             await pocket_db.update_pick_offset(telegram_user_id=telegram_user_id, pick_type=pick_type, tag=tag, offset=offset)
 
 
+async def get_sort_order(user_id):
+    async with async_session() as session:
+        async with session.begin():
+            pdb = PocketDB(session)
+            sort_order = SORT_NEWEST
+            db_user_pref = await pdb._get_db_user_pref(user_id=user_id)
+            if db_user_pref is not None:
+                sort_order = db_user_pref.sort_order
+            if sort_order == SORT_NEWEST:
+                return 'newest'
+            else:
+                return 'oldest'
+
+
+async def update_user_pref(telegram_user_id, sort_order=1):
+    async with async_session() as session:
+        async with session.begin():
+            pocket_db = PocketDB(session)
+            await pocket_db.update_user_pref(telegram_user_id=telegram_user_id, sort_order=sort_order)
+
+
 def main():
     global influxdb_bucket
     global influxdb_rw
@@ -719,6 +804,7 @@ def main():
         application.bot_data["callback_url"] = ngrok_tunnel_url
         # on different commands - answer in Telegram
         application.add_handler(CommandHandler("start", start))
+        application.add_handler(CallbackQueryHandler(callback=configure, pattern=f'^{ACTION_SETTINGS_PREFIX}.*$'))
         application.add_handler(CallbackQueryHandler(callback=registration, pattern="^" + str(ACTION_AUTHORIZE) + "$"))
         application.add_handler(CallbackQueryHandler(callback=cancel, pattern="^" + str(ACTION_NONE) + "$"))
         application.add_handler(CommandHandler("help", help_command))
