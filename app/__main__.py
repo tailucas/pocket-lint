@@ -212,8 +212,7 @@ class DbPickOffset(Base):
     pick_type = Column(Integer, default=0, index=True)
     tag_digest = Column(String(96), index=True)
     offset = Column(Integer, default=0)
-    UniqueConstraint(user_id, pick_type)
-    UniqueConstraint(user_id, tag_digest)
+    UniqueConstraint(user_id, pick_type, tag_digest)
 
 
 class PocketDB():
@@ -272,10 +271,10 @@ class PocketDB():
     async def _get_db_pick_offset(self, user_id, pick_type, tag_digest) -> DbPickOffset:
         where_condition = (
             (DbPickOffset.user_id==user_id) &
-            (DbPickOffset.pick_type==pick_type)
+            (DbPickOffset.pick_type==pick_type) &
+            (DbPickOffset.tag_digest==tag_digest)
         )
-        if tag_digest is not None:
-            where_condition += (DbPickOffset.tag_digest==tag_digest)
+        log.debug(f'Fetching {pick_type=} offset for DB user {user_id} with tag digest {tag_digest}')
         q = await self.db_session.execute(select(DbPickOffset).where(where_condition))
         return q.scalars().one_or_none()
 
@@ -419,8 +418,8 @@ async def pick_from_pocket(telegram_user_id, telegram_user_first_name, pick_type
             if item_tags:
                 tag_list = ', '.join(sorted(item_tags))
                 response_message += rf' tags: <b>{tag_list}</b>'
-            log.debug(f'Saving {pick_type=} offset to DB {offset=}')
-            await update_offset(telegram_user_id=pocket_user.telegram_user_id, pick_type=pick_type, tag=None, offset=offset)
+            log.debug(f'Saving {pick_type=} offset to DB {offset=}, tagged? {tag is not None}')
+            await update_offset(telegram_user_id=pocket_user.telegram_user_id, pick_type=pick_type, tag=tag, offset=offset)
     return response_message
 
 
