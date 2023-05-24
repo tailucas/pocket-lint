@@ -120,6 +120,9 @@ influxdb_bucket = None
 influxdb_rw: WriteApi = None
 
 START_ACTIVITY = 100
+CONFIGURE_ACTIVITY = 200
+ACTION_CONFIGURE_SORT_OLD = 4
+ACTION_CONFIGURE_SORT_NEW = 3
 ACTION_AUTHORIZE = 2
 ACTION_NONE = 0
 
@@ -355,9 +358,43 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     return START_ACTIVITY
 
 
+async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send a message when the command /settings is issued."""
+    user: TelegramUser = update.effective_user
+    if user.is_bot:
+        log.warning(f'Ignoring bot user {user.id}.')
+        return
+    log.info(f'Showing settings for Telegram user ID {user.id} (language {user.language_code}).')
+    pocket_user: User = await get_user_registration(telegram_user_id=user.id)
+    if pocket_user is None or pocket_user.pocket_access_token is None:
+        response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":passport_control:")}</tg-emoji> {user.first_name}, authorization with your Pocket account is needed first. Use /start.'
+        await update.message.reply_text(
+            text=response_message,
+            parse_mode=ParseMode.HTML
+        )
+    else:
+        log.info(f'Found database registration for Telegram user ID {user.id}.')
+        response_message = rf'{emoji.emojize(":gear:")} {user.first_name}, which sort order do you want first? Changing this will reset your pick positions.'
+        user_keyboard = [
+            [
+                InlineKeyboardButton("Newest", callback_data=str(ACTION_CONFIGURE_SORT_NEW)),
+                InlineKeyboardButton("Oldest", callback_data=str(ACTION_CONFIGURE_SORT_OLD))
+            ],
+            [
+                InlineKeyboardButton("Cancel", callback_data=str(ACTION_NONE))
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(user_keyboard)
+        await update.message.reply_html(
+            text=response_message,
+            reply_markup=reply_markup
+        )
+    return START_ACTIVITY
+
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /help is issued."""
-    await update.message.reply_text("Help!")
+    await update.message.reply_text("Coming soon...")
 
 
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -499,12 +536,12 @@ async def tagged(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             telegram_user_first_name=user.first_name,
             pick_type=PICK_TYPE_TAGGING,
             tag=str(context.args[0]))
-        await update.message.reply_text(
-            text=response_message,
-            parse_mode=ParseMode.HTML
-        )
     else:
-        log.warning(f'No arguments provided for tagged command.')
+        response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":light_bulb:")}</tg-emoji> Add a tag to this command like <pre>/tagged fun</pre>.'
+    await update.message.reply_text(
+        text=response_message,
+        parse_mode=ParseMode.HTML
+    )
 
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -685,6 +722,7 @@ def main():
         application.add_handler(CallbackQueryHandler(callback=registration, pattern="^" + str(ACTION_AUTHORIZE) + "$"))
         application.add_handler(CallbackQueryHandler(callback=cancel, pattern="^" + str(ACTION_NONE) + "$"))
         application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("settings", settings))
         # pocket commands
         application.add_handler(CommandHandler("pick", pick))
         application.add_handler(CommandHandler("archived", archived))
