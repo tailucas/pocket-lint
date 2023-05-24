@@ -123,6 +123,11 @@ START_ACTIVITY = 100
 ACTION_AUTHORIZE = 2
 ACTION_NONE = 0
 
+PICK_TYPE_UNREAD = 0
+PICK_TYPE_ARCHIVED = 1
+PICK_TYPE_FAVORITE = 2
+PICK_TYPE_TAGGING = 4
+
 
 def influxdb_write(point_name, field_name, field_value):
     try:
@@ -177,7 +182,7 @@ class DbUser(Base):
     pocket_access_token = Column(JSON)
     pocket_access_token_digest = Column(String(96), unique=True)
     UniqueConstraint(telegram_user_id, pocket_access_token_digest)
-    links_items = relationship('Item', backref='items', cascade='all, delete-orphan', lazy='dynamic')
+    links_items = relationship('DbItem', backref='items', cascade='all, delete-orphan', lazy='dynamic')
 
 
 class User(object):
@@ -193,11 +198,22 @@ class User(object):
         self.pocket_username_digest = db_user.pocket_username_digest
 
 
-class Item(Base):
+class DbItem(Base):
     __tablename__ = 'items'
     id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(Integer, ForeignKey('users.id'))
-    last_offset = Column(Integer, default=0)
+    user_id = Column(Integer, ForeignKey('users.id'), index=True)
+    url_digest = (Column(String(96), index=True))
+
+
+class DbPickOffset(Base):
+    __tablename__ = 'pick_offsets'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('users.id'), index=True)
+    pick_type = Column(Integer, default=0, index=True)
+    tag_digest = Column(String(96), index=True)
+    offset = Column(Integer, default=0)
+    UniqueConstraint(user_id, pick_type)
+    UniqueConstraint(user_id, tag_digest)
 
 
 class PocketDB():
@@ -231,23 +247,36 @@ class PocketDB():
         q.execution_options(synchronize_session="fetch")
         return await self.db_session.execute(q)
 
-    async def insert_item(self, telegram_user_id, offset):
-        log.debug(f'Inserting item for Telegram user {telegram_user_id}.')
+    async def update_pick_offset(self, telegram_user_id, pick_type, tag, offset):
+        log.debug(f'Updating pick offset for Telegram user {telegram_user_id}: {pick_type=}, {offset=}.')
         db_user = await self._get_db_user(telegram_user_id=telegram_user_id)
         if db_user is not None:
-            log.debug(f'Fetched DB user ID {db_user.id} for new item.')
-            db_item = await self._get_db_item(user_id=db_user.id)
-            if db_item is None:
-                db_item = Item(user_id=db_user.id, last_offset=offset)
+            log.debug(f'Fetched DB user ID {db_user.id} for offset update {offset=}; tag? {tag is not None}.')
+            tag_digest = None
+            if tag is not None:
+                tag_digest = digest(payload=tag)
+            db_offset = await self._get_db_pick_offset(user_id=db_user.id, pick_type=pick_type, tag_digest=tag_digest)
+            if db_offset is None:
+                db_offset = DbPickOffset(user_id=db_user.id, pick_type=pick_type, tag_digest=tag_digest, offset=offset)
             else:
-                db_item.last_offset = offset
-            self.db_session.add(db_item)
+                db_offset.offset = offset
+            self.db_session.add(db_offset)
             await self.db_session.flush()
         else:
             log.warning(f'No DB user to support item for Telegram user ID {telegram_user_id}, {offset=}')
 
-    async def _get_db_item(self, user_id) -> Item:
-        q = await self.db_session.execute(select(Item).where(Item.user_id==user_id))
+    async def _get_db_item(self, user_id) -> DbItem:
+        q = await self.db_session.execute(select(DbItem).where(DbItem.user_id==user_id))
+        return q.scalars().one_or_none()
+
+    async def _get_db_pick_offset(self, user_id, pick_type, tag_digest) -> DbPickOffset:
+        where_condition = (
+            (DbPickOffset.user_id==user_id) &
+            (DbPickOffset.pick_type==pick_type)
+        )
+        if tag_digest is not None:
+            where_condition += (DbPickOffset.tag_digest==tag_digest)
+        q = await self.db_session.execute(select(DbPickOffset).where(where_condition))
         return q.scalars().one_or_none()
 
     async def _get_db_user(self, telegram_user_id) -> DbUser:
@@ -338,68 +367,76 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(update.message.text)
 
 
+async def pick_from_pocket(telegram_user_id, telegram_user_first_name, pick_type=PICK_TYPE_UNREAD, tag=None) -> String:
+    pocket_user: User = await get_user_registration(telegram_user_id=telegram_user_id)
+    if pocket_user is None or pocket_user.pocket_access_token is None:
+        response_message = rf'{emoji.emojize(":passport_control:")} {telegram_user_first_name}, authorization with your Pocket account is needed first. Use /start.'
+    else:
+        offset = 0
+        db_offset: DbPickOffset = await get_offset(user_id=pocket_user.id, pick_type=pick_type, tag=tag)
+        if db_offset is not None:
+            offset = db_offset.offset+1
+        log.debug(f'Fetching item {pick_type=} using {offset=}')
+        pocket_instance = Pocket(creds.pocket_api_consumer_key, pocket_user.pocket_access_token)
+        # FIXME: bit masking
+        if pick_type == PICK_TYPE_ARCHIVED:
+            items = pocket_instance.get(state='archive', detailType='complete', count=1, offset=offset)
+        elif pick_type == PICK_TYPE_FAVORITE:
+            items = pocket_instance.get(favorite=1, detailType='complete', count=1, offset=offset)
+        elif pick_type == PICK_TYPE_TAGGING:
+            items = pocket_instance.get(tag=tag, detailType='complete', count=1, offset=offset)
+        else:
+            items = pocket_instance.get(detailType='complete', count=1, offset=offset)
+        if len(items) == 0 or len(items[0]['list']) == 0:
+            response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":floppy_disk:")}</tg-emoji> No links found, sorry.'
+        else:
+            log.debug(f'Pocket response {items!s}')
+            real_items = items[0]['list']
+            item_url = None
+            item_title = None
+            item_detail = None
+            item_read_time = None
+            item_tags = None
+            for item_key, item_data in real_items.items():
+                log.debug(f'{item_key=}: {item_data!s}')
+                item_url = item_data['given_url']
+                if 'given_title' in item_data.keys():
+                    item_title = item_data['given_title']
+                if 'excerpt' in item_data.keys():
+                    item_detail = item_data['excerpt']
+                if 'time_to_read' in item_data.keys():
+                    item_read_time = item_data['time_to_read']
+                if 'tags' in item_data.keys():
+                    item_tags = item_data['tags'].keys()
+            if item_title:
+                response_message = rf'<a href="{item_url}">{item_title}</a>'
+                if item_detail:
+                    response_message += rf': <i>{item_detail}</i>'
+                if item_read_time:
+                    response_message += rf' ({item_read_time} minute read)'
+            else:
+                response_message = rf'{item_url}'
+            if item_tags:
+                tag_list = ', '.join(sorted(item_tags))
+                response_message += rf' tags: <b>{tag_list}</b>'
+            log.debug(f'Saving {pick_type=} offset to DB {offset=}')
+            await update_offset(telegram_user_id=pocket_user.telegram_user_id, pick_type=pick_type, tag=None, offset=offset)
+    return response_message
+
+
 async def pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user: TelegramUser = update.effective_user
     if user.is_bot:
         log.warning(f'Ignoring bot user {user.id}.')
         return
     log.info(f'/pick for Telegram user ID {user.id}...')
-    pocket_user: User = await get_user_registration(telegram_user_id=user.id)
-    if pocket_user is None or pocket_user.pocket_access_token is None:
-        response_message = rf'{emoji.emojize(":passport_control:")} {user.first_name}, authorization with your Pocket account is needed first. Use /start.'
-    else:
-        offset = 0
-        user_item: Item = await get_item(pocket_user.id)
-        if user_item is not None:
-            offset = user_item.last_offset+1
-        log.debug(f'Fetching item using {offset}')
-        pocket_instance = Pocket(creds.pocket_api_consumer_key, pocket_user.pocket_access_token)
-        items = pocket_instance.get(detailType='complete', count=1, offset=offset)
-        log.debug(f'Pocket response {items!s}')
-        real_items = items[0]['list']
-        item_url = None
-        item_title = None
-        item_detail = None
-        item_read_time = None
-        item_tags = None
-        for item_key, item_data in real_items.items():
-            log.debug(f'{item_key=}: {item_data!s}')
-            item_url = item_data['given_url']
-            if 'given_title' in item_data.keys():
-                item_title = item_data['given_title']
-            if 'excerpt' in item_data.keys():
-                item_detail = item_data['excerpt']
-            if 'time_to_read' in item_data.keys():
-                item_read_time = item_data['time_to_read']
-            if 'tags' in item_data.keys():
-                item_tags = item_data['tags'].keys()
-        if item_title:
-            response_message = rf'<a href="{item_url}">{item_title}</a>'
-            if item_detail:
-                response_message += rf': <i>{item_detail}</i>'
-            if item_read_time:
-                response_message += rf' ({item_read_time} minute read)'
-            if item_tags:
-                tag_list = ', '.join(sorted(item_tags))
-                response_message += rf' tags: <b>{tag_list}</b>'
-        else:
-            response_message = rf'{item_url}'
-        log.debug(f'Saving offset to DB {offset=}')
-        await store_item(telegram_user_id=pocket_user.telegram_user_id, offset=offset)
-    # FIXME: Use Markdown when escape function works consistency with inputs
+    response_message = await pick_from_pocket(
+        telegram_user_id=user.id,
+        telegram_user_first_name=user.first_name)
     await update.message.reply_text(
         text=response_message,
         parse_mode=ParseMode.HTML
     )
-
-
-async def unread(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user: TelegramUser = update.effective_user
-    if user.is_bot:
-        log.warning(f'Ignoring bot user {user.id}.')
-        return
-    log.info(f'/unread for Telegram user ID {user.id}...')
-    pocket_user: User = await get_user_registration(telegram_user_id=user.id)
 
 
 async def archived(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -408,7 +445,14 @@ async def archived(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         log.warning(f'Ignoring bot user {user.id}.')
         return
     log.info(f'/archived for Telegram user ID {user.id}...')
-    pocket_user: User = await get_user_registration(telegram_user_id=user.id)
+    response_message = await pick_from_pocket(
+        telegram_user_id=user.id,
+        telegram_user_first_name=user.first_name,
+        pick_type=PICK_TYPE_ARCHIVED)
+    await update.message.reply_text(
+        text=response_message,
+        parse_mode=ParseMode.HTML
+    )
 
 
 async def favorite(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -417,7 +461,14 @@ async def favorite(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         log.warning(f'Ignoring bot user {user.id}.')
         return
     log.info(f'/favorite for Telegram user ID {user.id}...')
-    pocket_user: User = await get_user_registration(telegram_user_id=user.id)
+    response_message = await pick_from_pocket(
+        telegram_user_id=user.id,
+        telegram_user_first_name=user.first_name,
+        pick_type=PICK_TYPE_FAVORITE)
+    await update.message.reply_text(
+        text=response_message,
+        parse_mode=ParseMode.HTML
+    )
 
 
 async def untagged(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -426,7 +477,15 @@ async def untagged(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         log.warning(f'Ignoring bot user {user.id}.')
         return
     log.info(f'/untagged for Telegram user ID {user.id}...')
-    pocket_user: User = await get_user_registration(telegram_user_id=user.id)
+    response_message = await pick_from_pocket(
+        telegram_user_id=user.id,
+        telegram_user_first_name=user.first_name,
+        pick_type=PICK_TYPE_TAGGING,
+        tag='_untagged_')
+    await update.message.reply_text(
+        text=response_message,
+        parse_mode=ParseMode.HTML
+    )
 
 
 async def tagged(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -435,7 +494,18 @@ async def tagged(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         log.warning(f'Ignoring bot user {user.id}.')
         return
     log.info(f'/tagged for Telegram user ID {user.id}...')
-    pocket_user: User = await get_user_registration(telegram_user_id=user.id)
+    if len(context.args) == 1:
+        response_message = await pick_from_pocket(
+            telegram_user_id=user.id,
+            telegram_user_first_name=user.first_name,
+            pick_type=PICK_TYPE_TAGGING,
+            tag=str(context.args[0]))
+        await update.message.reply_text(
+            text=response_message,
+            parse_mode=ParseMode.HTML
+        )
+    else:
+        log.warning(f'No arguments provided for tagged command.')
 
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -563,11 +633,21 @@ async def store_access_token(telegram_user_id, pocket_username, pocket_access_to
             await pocket_db.insert_access_token(telegram_user_id=telegram_user_id, pocket_username=pocket_username, pocket_access_token=pocket_access_token)
 
 
-async def store_item(telegram_user_id, offset):
+async def get_offset(user_id, pick_type, tag=None):
+    async with async_session() as session:
+        async with session.begin():
+            pdb = PocketDB(session)
+            tag_digest = None
+            if tag is not None:
+                tag_digest = digest(tag)
+            return await pdb._get_db_pick_offset(user_id=user_id, pick_type=pick_type, tag_digest=tag_digest)
+
+
+async def update_offset(telegram_user_id, pick_type, tag, offset):
     async with async_session() as session:
         async with session.begin():
             pocket_db = PocketDB(session)
-            await pocket_db.insert_item(telegram_user_id=telegram_user_id, offset=offset)
+            await pocket_db.update_pick_offset(telegram_user_id=telegram_user_id, pick_type=pick_type, tag=tag, offset=offset)
 
 
 def main():
@@ -608,7 +688,6 @@ def main():
         application.add_handler(CommandHandler("help", help_command))
         # pocket commands
         application.add_handler(CommandHandler("pick", pick))
-        application.add_handler(CommandHandler("unread", unread))
         application.add_handler(CommandHandler("archived", archived))
         application.add_handler(CommandHandler("favorite", favorite))
         application.add_handler(CommandHandler("untagged", untagged))
