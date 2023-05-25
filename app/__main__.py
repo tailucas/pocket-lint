@@ -58,16 +58,15 @@ from pocket import Pocket
 
 from requests.adapters import ConnectionError
 from requests.exceptions import RequestException
-
 from telegram import (
     ForceReply,
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     User as TelegramUser,
-    ChatMember as TelegramChatMember
+    ChatMember as TelegramChatMember,
 )
-from telegram.constants import ParseMode
+from telegram.constants import ParseMode, ChatAction
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -121,6 +120,11 @@ influxdb_rw: WriteApi = None
 
 START_ACTIVITY = 100
 CONFIGURE_ACTIVITY = 200
+POCKET_ACTIVITY = 300
+ACTION_POCKET_PREFIX = "pocket"
+ACTION_POCKET_MARK_READ = f'{ACTION_POCKET_PREFIX}_mark_read'
+ACTION_POCKET_MARK_ARCHIVE = f'{ACTION_POCKET_PREFIX}_mark_archive'
+ACTION_POCKET_ADD_TAG = f'{ACTION_POCKET_PREFIX}_tag'
 ACTION_SETTINGS_PREFIX = "settings"
 SORT_NEWEST = 1
 ACTION_SETTINGS_SORT_NEWEST = f'{ACTION_SETTINGS_PREFIX}_sort_{SORT_NEWEST}'
@@ -277,7 +281,6 @@ class PocketDB():
         else:
             log.warning(f'No DB user to support item for Telegram user ID {telegram_user_id}, {offset=}')
 
-
     async def update_user_pref(self, telegram_user_id, sort_order):
         log.debug(f'Updating preference for Telegram user {telegram_user_id}: {sort_order=}.')
         db_user = await self._get_db_user(telegram_user_id=telegram_user_id)
@@ -294,7 +297,6 @@ class PocketDB():
             await self._reset_pick_offset(user_id=db_user.id)
         else:
             log.warning(f'No DB user to support item for Telegram user ID {telegram_user_id}, {sort_order=}')
-
 
     async def _get_db_item(self, user_id) -> DbItem:
         q = await self.db_session.execute(select(DbItem).where(DbItem.user_id==user_id))
@@ -508,13 +510,22 @@ async def pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         log.warning(f'Ignoring bot user {user.id}.')
         return
     log.info(f'/pick for Telegram user ID {user.id}...')
+    await context.bot.send_chat_action(chat_id=update.effective_message.chat_id, action=ChatAction.TYPING)
     response_message = await pick_from_pocket(
         telegram_user_id=user.id,
         telegram_user_first_name=user.first_name)
-    await update.message.reply_text(
+    user_keyboard = [
+        [
+            InlineKeyboardButton("Mark as Read", callback_data=ACTION_POCKET_MARK_READ),
+            InlineKeyboardButton("Move to Archive", callback_data=ACTION_POCKET_MARK_ARCHIVE)
+        ],
+    ]
+    reply_markup = InlineKeyboardMarkup(user_keyboard)
+    await update.message.reply_html(
         text=response_message,
-        parse_mode=ParseMode.HTML
+        reply_markup=reply_markup
     )
+    return POCKET_ACTIVITY
 
 
 async def archived(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -560,11 +571,16 @@ async def untagged(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         telegram_user_first_name=user.first_name,
         pick_type=PICK_TYPE_TAGGING,
         tag='_untagged_')
-    await update.message.reply_text(
+    user_keyboard = [
+        [
+            InlineKeyboardButton("Add Tag", callback_data=ACTION_POCKET_ADD_TAG)
+        ],
+    ]
+    reply_markup = InlineKeyboardMarkup(user_keyboard)
+    await update.message.reply_html(
         text=response_message,
-        parse_mode=ParseMode.HTML
+        reply_markup=reply_markup
     )
-
 
 async def tagged(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user: TelegramUser = update.effective_user
