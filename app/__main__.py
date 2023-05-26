@@ -118,20 +118,22 @@ from influxdb_client.client.write_api import WriteApi, ASYNCHRONOUS
 influxdb_bucket = None
 influxdb_rw: WriteApi = None
 
-START_ACTIVITY = 100
-CONFIGURE_ACTIVITY = 200
-POCKET_ACTIVITY = 300
 ACTION_POCKET_PREFIX = "pocket"
-ACTION_POCKET_MARK_READ = f'{ACTION_POCKET_PREFIX}_mark_read'
-ACTION_POCKET_MARK_ARCHIVE = f'{ACTION_POCKET_PREFIX}_mark_archive'
-ACTION_POCKET_ADD_TAG = f'{ACTION_POCKET_PREFIX}_tag'
+ACTION_POCKET_ARCHIVE = f'{ACTION_POCKET_PREFIX}_archive'
+ACTION_POCKET_TAG = f'{ACTION_POCKET_PREFIX}_tag'
 ACTION_SETTINGS_PREFIX = "settings"
 SORT_NEWEST = 1
 ACTION_SETTINGS_SORT_NEWEST = f'{ACTION_SETTINGS_PREFIX}_sort_{SORT_NEWEST}'
 SORT_OLDEST = 0
 ACTION_SETTINGS_SORT_OLDEST = f'{ACTION_SETTINGS_PREFIX}_sort_{SORT_OLDEST}'
+ACTION_SETTINGS_AUTO_ARCHIVE_ON = f'{ACTION_SETTINGS_PREFIX}_autoarchive_on'
+ACTION_SETTINGS_AUTO_ARCHIVE_OFF = f'{ACTION_SETTINGS_PREFIX}_autoarchive_off'
 ACTION_AUTHORIZE = 2
 ACTION_NONE = 0
+
+DEFAULT_SORT = SORT_NEWEST
+DEFAULT_AUTO_ARCHIVE = False
+DEFAULT_TAG_UNTAGGED = '_untagged_'
 
 PICK_TYPE_UNREAD = 0
 PICK_TYPE_ARCHIVED = 1
@@ -213,6 +215,17 @@ class DbUserPref(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey('users.id'), index=True)
     sort_order = Column(Integer, default=SORT_NEWEST)
+    auto_archive = Column(Integer, default=0)
+
+
+class UserPref(object):
+    def __init__(self, user_id: int, db_user_pref: DbUserPref) -> None:
+        self.user_id = user_id
+        self.sort_order = db_user_pref.sort_order
+        if db_user_pref.auto_archive == 1:
+            self.auto_archive = True
+        else:
+            self.auto_archive = False
 
 
 class DbItem(Base):
@@ -281,16 +294,29 @@ class PocketDB():
         else:
             log.warning(f'No DB user to support item for Telegram user ID {telegram_user_id}, {offset=}')
 
-    async def update_user_pref(self, telegram_user_id, sort_order):
+    async def update_user_pref(self, telegram_user_id, sort_order, auto_archive):
+        if sort_order is None and auto_archive is None:
+            log.warning(f'No preference specified for Telegram user {telegram_user_id}')
+            return
         log.debug(f'Updating preference for Telegram user {telegram_user_id}: {sort_order=}.')
         db_user = await self._get_db_user(telegram_user_id=telegram_user_id)
         if db_user is not None:
             log.debug(f'Fetched DB user ID {db_user.id} for preference update {sort_order=}.')
             db_pref = await self._get_db_user_pref(user_id=db_user.id)
             if db_pref is None:
-                db_pref = DbUserPref(user_id=db_user.id, sort_order=sort_order)
+                if sort_order is None:
+                    sort_order = DEFAULT_SORT
+                if auto_archive is None:
+                    auto_archive = DEFAULT_AUTO_ARCHIVE
+                db_pref = DbUserPref(user_id=db_user.id, sort_order=sort_order, auto_archive=auto_archive)
             else:
-                db_pref.sort_order = sort_order
+                if sort_order is not None:
+                    db_pref.sort_order = sort_order
+                if auto_archive is not None:
+                    if auto_archive:
+                        db_pref.auto_archive = 1
+                    else:
+                        db_pref.auto_archive = 0
             self.db_session.add(db_pref)
             await self.db_session.flush()
             # reset offsets
@@ -398,7 +424,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         text=user_response,
         reply_markup=reply_markup
     )
-    return START_ACTIVITY
 
 
 async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -417,11 +442,17 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
     else:
         log.info(f'Found database registration for Telegram user ID {user.id}.')
-        response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":gear:")}</tg-emoji> {user.first_name}, pick your sort order. <tg-emoji emoji-id="2">{emoji.emojize(":warning:")}</tg-emoji> <b>Note:</b> Changing this will reset your pick positions.'
+        response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":gear:")}</tg-emoji> ' \
+            '<b>Note:</b> Changing sort order will reset your pick positions. ' \
+            'Auto-archive updates Pocket when picking a link to archive the item.'
         user_keyboard = [
             [
-                InlineKeyboardButton("Newest", callback_data=ACTION_SETTINGS_SORT_NEWEST),
-                InlineKeyboardButton("Oldest", callback_data=ACTION_SETTINGS_SORT_OLDEST)
+                InlineKeyboardButton("Sort Newest", callback_data=ACTION_SETTINGS_SORT_NEWEST),
+                InlineKeyboardButton("Sort Oldest", callback_data=ACTION_SETTINGS_SORT_OLDEST)
+            ],
+            [
+                InlineKeyboardButton("Auto-archive on", callback_data=ACTION_SETTINGS_AUTO_ARCHIVE_ON),
+                InlineKeyboardButton("Auto-archive off", callback_data=ACTION_SETTINGS_AUTO_ARCHIVE_OFF)
             ],
             [
                 InlineKeyboardButton("Cancel", callback_data=str(ACTION_NONE))
@@ -432,7 +463,6 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             text=response_message,
             reply_markup=reply_markup
         )
-    return START_ACTIVITY
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -446,17 +476,28 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(update.message.text)
 
 
-async def pick_from_pocket(telegram_user_id, telegram_user_first_name, pick_type=PICK_TYPE_UNREAD, tag=None) -> String:
-    pocket_user: User = await get_user_registration(telegram_user_id=telegram_user_id)
+async def pick_from_pocket(update: Update, context: ContextTypes.DEFAULT_TYPE, pick_type=PICK_TYPE_UNREAD, tag=None) -> String:
+    user: TelegramUser = update.effective_user
+    await context.bot.send_chat_action(chat_id=update.effective_message.chat_id, action=ChatAction.TYPING)
+    pocket_user: User = await get_user_registration(telegram_user_id=user.id)
+    user_keyboard_header = None
+    user_keyboard = None
     if pocket_user is None or pocket_user.pocket_access_token is None:
-        response_message = rf'{emoji.emojize(":passport_control:")} {telegram_user_first_name}, authorization with your Pocket account is needed first. Use /start.'
+        response_message = rf'{emoji.emojize(":passport_control:")} {user.first_name}, authorization with your Pocket account is needed first. Use /start.'
     else:
         offset = 0
         db_offset: DbPickOffset = await get_offset(user_id=pocket_user.id, pick_type=pick_type, tag=tag)
         if db_offset is not None:
             offset = db_offset.offset+1
-        sort_order = await get_sort_order(user_id=pocket_user.id)
-        log.debug(f'Fetching item {pick_type=} using {offset=}, {sort_order=}')
+        user_prefs = await get_user_prefs(pocket_user=pocket_user)
+        if user_prefs is None:
+            log.debug(f'No user preferences found for Telegram user ID {user.id}.')
+            sort_order = DEFAULT_SORT
+            auto_archive = DEFAULT_AUTO_ARCHIVE
+        else:
+            sort_order = user_prefs.sort_order
+            auto_archive = user_prefs.auto_archive
+        log.debug(f'Fetching item {pick_type=} using {offset=}, {sort_order=}, {auto_archive=}')
         pocket_instance = Pocket(creds.pocket_api_consumer_key, pocket_user.pocket_access_token)
         # FIXME: bit masking
         if pick_type == PICK_TYPE_ARCHIVED:
@@ -465,8 +506,26 @@ async def pick_from_pocket(telegram_user_id, telegram_user_first_name, pick_type
             items = pocket_instance.get(favorite=1, sort=sort_order, detailType='complete', count=1, offset=offset)
         elif pick_type == PICK_TYPE_TAGGING:
             items = pocket_instance.get(tag=tag, sort=sort_order, detailType='complete', count=1, offset=offset)
-        else:
+            if tag == DEFAULT_TAG_UNTAGGED:
+                user_keyboard_header = rf'<tg-emoji emoji-id="1">{emoji.emojize(":bookmark_tabs:")}</tg-emoji> Update Pocket?'
+                user_keyboard = [
+                    [
+                        InlineKeyboardButton("Add Tags", callback_data=ACTION_POCKET_TAG)
+                    ],
+                ]
+        elif pick_type == PICK_TYPE_UNREAD:
             items = pocket_instance.get(sort=sort_order, detailType='complete', count=1, offset=offset)
+            if not auto_archive:
+                user_keyboard_header = rf'<tg-emoji emoji-id="1">{emoji.emojize(":bookmark_tabs:")}</tg-emoji> Update Pocket?'
+                user_keyboard = [
+                    [
+                        InlineKeyboardButton("Archive", callback_data=ACTION_POCKET_ARCHIVE),
+                        InlineKeyboardButton("Cancel", callback_data=str(ACTION_NONE))
+                    ],
+                ]
+        else:
+            log.warning(f'No valid pick type selected: {pick_type}.')
+            return
         if len(items) == 0 or len(items[0]['list']) == 0:
             response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":floppy_disk:")}</tg-emoji> No links found, sorry.'
         else:
@@ -501,7 +560,16 @@ async def pick_from_pocket(telegram_user_id, telegram_user_first_name, pick_type
                 response_message += rf' tags: <b>{tag_list}</b>'
             log.debug(f'Saving {pick_type=} offset to DB {offset=}, tagged? {tag is not None}')
             await update_offset(telegram_user_id=pocket_user.telegram_user_id, pick_type=pick_type, tag=tag, offset=offset)
-    return response_message
+    await update.message.reply_text(
+        text=response_message,
+        parse_mode=ParseMode.HTML
+    )
+    if user_keyboard and user_keyboard_header:
+        reply_markup = InlineKeyboardMarkup(user_keyboard)
+        await update.message.reply_html(
+            text=user_keyboard_header,
+            reply_markup=reply_markup
+        )
 
 
 async def pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -510,22 +578,7 @@ async def pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         log.warning(f'Ignoring bot user {user.id}.')
         return
     log.info(f'/pick for Telegram user ID {user.id}...')
-    await context.bot.send_chat_action(chat_id=update.effective_message.chat_id, action=ChatAction.TYPING)
-    response_message = await pick_from_pocket(
-        telegram_user_id=user.id,
-        telegram_user_first_name=user.first_name)
-    user_keyboard = [
-        [
-            InlineKeyboardButton("Mark as Read", callback_data=ACTION_POCKET_MARK_READ),
-            InlineKeyboardButton("Move to Archive", callback_data=ACTION_POCKET_MARK_ARCHIVE)
-        ],
-    ]
-    reply_markup = InlineKeyboardMarkup(user_keyboard)
-    await update.message.reply_html(
-        text=response_message,
-        reply_markup=reply_markup
-    )
-    return POCKET_ACTIVITY
+    await pick_from_pocket(update=update, context=context)
 
 
 async def archived(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -534,14 +587,7 @@ async def archived(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         log.warning(f'Ignoring bot user {user.id}.')
         return
     log.info(f'/archived for Telegram user ID {user.id}...')
-    response_message = await pick_from_pocket(
-        telegram_user_id=user.id,
-        telegram_user_first_name=user.first_name,
-        pick_type=PICK_TYPE_ARCHIVED)
-    await update.message.reply_text(
-        text=response_message,
-        parse_mode=ParseMode.HTML
-    )
+    await pick_from_pocket(update=update, context=context, pick_type=PICK_TYPE_ARCHIVED)
 
 
 async def favorite(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -550,14 +596,7 @@ async def favorite(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         log.warning(f'Ignoring bot user {user.id}.')
         return
     log.info(f'/favorite for Telegram user ID {user.id}...')
-    response_message = await pick_from_pocket(
-        telegram_user_id=user.id,
-        telegram_user_first_name=user.first_name,
-        pick_type=PICK_TYPE_FAVORITE)
-    await update.message.reply_text(
-        text=response_message,
-        parse_mode=ParseMode.HTML
-    )
+    await pick_from_pocket(update=update, context=context, pick_type=PICK_TYPE_FAVORITE)
 
 
 async def untagged(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -566,21 +605,8 @@ async def untagged(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         log.warning(f'Ignoring bot user {user.id}.')
         return
     log.info(f'/untagged for Telegram user ID {user.id}...')
-    response_message = await pick_from_pocket(
-        telegram_user_id=user.id,
-        telegram_user_first_name=user.first_name,
-        pick_type=PICK_TYPE_TAGGING,
-        tag='_untagged_')
-    user_keyboard = [
-        [
-            InlineKeyboardButton("Add Tag", callback_data=ACTION_POCKET_ADD_TAG)
-        ],
-    ]
-    reply_markup = InlineKeyboardMarkup(user_keyboard)
-    await update.message.reply_html(
-        text=response_message,
-        reply_markup=reply_markup
-    )
+    await pick_from_pocket(update=update, context=context, pick_type=PICK_TYPE_TAGGING, tag=DEFAULT_TAG_UNTAGGED)
+
 
 async def tagged(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user: TelegramUser = update.effective_user
@@ -589,17 +615,11 @@ async def tagged(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     log.info(f'/tagged for Telegram user ID {user.id}...')
     if len(context.args) == 1:
-        response_message = await pick_from_pocket(
-            telegram_user_id=user.id,
-            telegram_user_first_name=user.first_name,
-            pick_type=PICK_TYPE_TAGGING,
-            tag=str(context.args[0]))
+        await pick_from_pocket(update=update, context=context, pick_type=PICK_TYPE_TAGGING, tag=str(context.args[0]))
     else:
-        response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":light_bulb:")}</tg-emoji> Add a tag to this command like <pre>/tagged fun</pre>.'
-    await update.message.reply_text(
-        text=response_message,
-        parse_mode=ParseMode.HTML
-    )
+        await update.message.reply_html(
+            text=rf'<tg-emoji emoji-id="1">{emoji.emojize(":light_bulb:")}</tg-emoji> Add a tag to this command like <pre>/tagged fun</pre>.',
+        )
 
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -625,6 +645,10 @@ async def configure(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update_user_pref(telegram_user_id=user.id, sort_order=SORT_NEWEST)
     elif user_selection == ACTION_SETTINGS_SORT_OLDEST:
         await update_user_pref(telegram_user_id=user.id, sort_order=SORT_OLDEST)
+    elif user_selection == ACTION_SETTINGS_AUTO_ARCHIVE_ON:
+        await update_user_pref(telegram_user_id=user.id, auto_archive=True)
+    elif user_selection == ACTION_SETTINGS_AUTO_ARCHIVE_OFF:
+        await update_user_pref(telegram_user_id=user.id, auto_archive=False)
     else:
         log.warning(f'Telegram user ID {user.id} has specified an invalid preference {user_selection=}')
     influxdb_write('bot', 'settings_updated', 1)
@@ -766,25 +790,21 @@ async def update_offset(telegram_user_id, pick_type, tag, offset):
             await pocket_db.update_pick_offset(telegram_user_id=telegram_user_id, pick_type=pick_type, tag=tag, offset=offset)
 
 
-async def get_sort_order(user_id):
+async def get_user_prefs(pocket_user: User) -> UserPref:
     async with async_session() as session:
         async with session.begin():
             pdb = PocketDB(session)
-            sort_order = SORT_NEWEST
-            db_user_pref = await pdb._get_db_user_pref(user_id=user_id)
-            if db_user_pref is not None:
-                sort_order = db_user_pref.sort_order
-            if sort_order == SORT_NEWEST:
-                return 'newest'
-            else:
-                return 'oldest'
+            db_user_pref = await pdb._get_db_user_pref(user_id=pocket_user.id)
+            if db_user_pref is None:
+                return None
+            return UserPref(user_id=pocket_user.id, db_user_pref=db_user_pref)
 
 
-async def update_user_pref(telegram_user_id, sort_order=1):
+async def update_user_pref(telegram_user_id, sort_order=None, auto_archive=None):
     async with async_session() as session:
         async with session.begin():
             pocket_db = PocketDB(session)
-            await pocket_db.update_user_pref(telegram_user_id=telegram_user_id, sort_order=sort_order)
+            await pocket_db.update_user_pref(telegram_user_id=telegram_user_id, sort_order=sort_order, auto_archive=auto_archive)
 
 
 def main():
