@@ -279,23 +279,26 @@ class PocketDB():
         q.execution_options(synchronize_session="fetch")
         return await self.db_session.execute(q)
 
-    async def update_pick_offset(self, telegram_user_id, pick_type, tag, offset):
-        log.debug(f'Updating pick offset for Telegram user {telegram_user_id}: {pick_type=}, {offset=}.')
-        db_user = await self._get_db_user(telegram_user_id=telegram_user_id)
-        if db_user is not None:
-            log.debug(f'Fetched DB user ID {db_user.id} for offset update {offset=}; tag? {tag is not None}.')
-            tag_digest = None
-            if tag is not None:
-                tag_digest = digest(payload=tag)
-            db_offset = await self._get_db_pick_offset(user_id=db_user.id, pick_type=pick_type, tag_digest=tag_digest)
-            if db_offset is None:
-                db_offset = DbPickOffset(user_id=db_user.id, pick_type=pick_type, tag_digest=tag_digest, offset=offset)
-            else:
-                db_offset.offset = offset
-            self.db_session.add(db_offset)
-            await self.db_session.flush()
+    async def get_pick_offset(self, user_id, pick_type, tag_digest) -> int:
+        db_offset: DbPickOffset = await self._get_db_pick_offset(user_id=user_id, pick_type=pick_type, tag_digest=tag_digest)
+        if db_offset is None:
+            return 0
+        return db_offset.offset
+
+    async def update_pick_offset(self, user_id, pick_type, tag, offset):
+        if offset < 0:
+            offset = 0
+        log.debug(f'Updating pick offset for DB user {user_id}: {pick_type=}, {offset=}. tag? {tag is not None}')
+        tag_digest = None
+        if tag is not None:
+            tag_digest = digest(payload=tag)
+        db_offset = await self._get_db_pick_offset(user_id=user_id, pick_type=pick_type, tag_digest=tag_digest)
+        if db_offset is None:
+            db_offset = DbPickOffset(user_id=user_id, pick_type=pick_type, tag_digest=tag_digest, offset=offset)
         else:
-            log.warning(f'No DB user to support item for Telegram user ID {telegram_user_id}, {offset=}')
+            db_offset.offset = offset
+        self.db_session.add(db_offset)
+        await self.db_session.flush()
 
     async def update_user_pref(self, telegram_user_id, sort_order, auto_archive):
         if sort_order is None and auto_archive is None:
@@ -496,10 +499,7 @@ async def pick_from_pocket(update: Update, context: ContextTypes.DEFAULT_TYPE, p
     if pocket_user is None or pocket_user.pocket_access_token is None:
         response_message = rf'{emoji.emojize(":passport_control:")} {user.first_name}, authorization with your Pocket account is needed first. Use /start.'
     else:
-        offset = 0
-        db_offset: DbPickOffset = await get_offset(user_id=pocket_user.id, pick_type=pick_type, tag=tag)
-        if db_offset is not None:
-            offset = db_offset.offset+1
+        offset = await get_offset(user_id=pocket_user.id, pick_type=pick_type, tag=tag)
         user_prefs = await get_user_prefs(pocket_user=pocket_user)
         if user_prefs is None:
             log.debug(f'No user preferences found for Telegram user ID {user.id}.')
@@ -592,8 +592,9 @@ async def pick_from_pocket(update: Update, context: ContextTypes.DEFAULT_TYPE, p
                 if item_tags:
                     tag_list = ', '.join(sorted(item_tags))
                     response_message += rf' tags: <b>{tag_list}</b>'
-                log.debug(f'Saving {pick_type=} offset to DB {offset=}, tagged? {tag is not None}')
-                await update_offset(telegram_user_id=pocket_user.telegram_user_id, pick_type=pick_type, tag=tag, offset=offset)
+                offset += 1
+                log.debug(f'Saving updated {pick_type=} offset to DB {offset=}, tagged? {tag is not None}')
+                await update_offset(user_id=pocket_user.id, pick_type=pick_type, tag=tag, offset=offset)
         else:
             log.warning(f'Bad status from Pocket {status}.')
             response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":stop_sign:")}</tg-emoji> Sorry, please try again later.'
@@ -764,6 +765,9 @@ async def tag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     pocket_instance = Pocket(creds.pocket_api_consumer_key, pocket_user.pocket_access_token)
     pocket_instance.tags_add(item_id=item_id, tags=','.join(tags)).commit()
     await update.message.reply_text(f'{len(tags)} tag(s) added to this Pocket link.')
+    offset = await get_offset(user_id=pocket_user.id, pick_type=PICK_TYPE_TAGGING, tag=DEFAULT_TAG_UNTAGGED)
+    log.debug(f'Correcting untagged offset {offset} for Telegram user ID {user.id}.')
+    await update_offset(user_id=pocket_user.id, pick_type=PICK_TYPE_TAGGING, tag=DEFAULT_TAG_UNTAGGED, offset=offset-1)
     return ConversationHandler.END
 
 
@@ -856,21 +860,21 @@ async def store_access_token(telegram_user_id, pocket_username, pocket_access_to
             await pocket_db.insert_access_token(telegram_user_id=telegram_user_id, pocket_username=pocket_username, pocket_access_token=pocket_access_token)
 
 
-async def get_offset(user_id, pick_type, tag=None):
+async def get_offset(user_id: int, pick_type: int, tag: str=None) -> int:
     async with async_session() as session:
         async with session.begin():
             pdb = PocketDB(session)
             tag_digest = None
             if tag is not None:
                 tag_digest = digest(tag)
-            return await pdb._get_db_pick_offset(user_id=user_id, pick_type=pick_type, tag_digest=tag_digest)
+            return await pdb.get_pick_offset(user_id=user_id, pick_type=pick_type, tag_digest=tag_digest)
 
 
-async def update_offset(telegram_user_id, pick_type, tag, offset):
+async def update_offset(user_id, pick_type, tag, offset):
     async with async_session() as session:
         async with session.begin():
             pocket_db = PocketDB(session)
-            await pocket_db.update_pick_offset(telegram_user_id=telegram_user_id, pick_type=pick_type, tag=tag, offset=offset)
+            await pocket_db.update_pick_offset(user_id=user_id, pick_type=pick_type, tag=tag, offset=offset)
 
 
 async def get_user_prefs(pocket_user: User) -> UserPref:
