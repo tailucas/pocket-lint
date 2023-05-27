@@ -572,6 +572,7 @@ async def pick_from_pocket(update: Update, context: ContextTypes.DEFAULT_TYPE, p
                 for item_key, item_data in real_items.items():
                     log.debug(f'{item_key=}: {item_data!s}')
                     item_id = item_data['item_id']
+                    context.user_data['pocket_item_id'] = item_id
                     item_url = item_data['given_url']
                     if 'given_title' in item_data.keys():
                         item_title = item_data['given_title']
@@ -617,6 +618,10 @@ async def pick_from_pocket(update: Update, context: ContextTypes.DEFAULT_TYPE, p
             text=user_follow_up,
             reply_markup=reply_markup
         )
+    # auto-archive
+    if item_id and user_prefs.auto_archive:
+        log.debug(f'Auto-archive of Pocket item {item_id} based on user-preference.')
+        pocket_instance.archive(item_id=item_id).commit()
     return item_id
 
 
@@ -740,6 +745,27 @@ async def registration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             'Please ensure that your mobile browser is already logged into ' \
             'Pocket before using this link due to a bug in the Pocket web authorization ' \
             'workflow.',
+        parse_mode=ParseMode.MARKDOWN)
+    return ConversationHandler.END
+
+
+async def pocket(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Parses the CallbackQuery and updates the message text."""
+    user: TelegramUser = update.effective_user
+    log.info(f'Pocket action for Telegram user ID {user.id}.')
+    query = update.callback_query
+    # CallbackQueries need to be answered, even if no notification to the user is needed
+    # Some clients may have trouble otherwise. See https://core.telegram.org/bots/api#callbackquery
+    await query.answer()
+    if 'pocket_item_id' not in context.user_data.keys():
+        log.warning(f'Unable to tag without an item ID present.')
+        return ConversationHandler.END
+    item_id = int(context.user_data['pocket_item_id'])
+    pocket_user: User = await get_user_registration(telegram_user_id=user.id)
+    pocket_instance = Pocket(creds.pocket_api_consumer_key, pocket_user.pocket_access_token)
+    pocket_instance.archive(item_id=item_id).commit()
+    await query.edit_message_text(
+        text=f'{emoji.emojize(":check_mark_button:")} Item archived.',
         parse_mode=ParseMode.MARKDOWN)
     return ConversationHandler.END
 
@@ -935,6 +961,7 @@ def main():
             CommandHandler("tagged", tagged),
             CallbackQueryHandler(callback=configure, pattern=f'^{ACTION_SETTINGS_PREFIX}.*$'),
             CallbackQueryHandler(callback=registration, pattern="^" + str(ACTION_AUTHORIZE) + "$"),
+            CallbackQueryHandler(callback=pocket, pattern=f'^{ACTION_POCKET_PREFIX}.*$'),
             CallbackQueryHandler(callback=cancel, pattern="^" + str(ACTION_NONE) + "$")
         ]
         tag_handler = ConversationHandler(
