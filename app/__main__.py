@@ -427,6 +427,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         text=user_response,
         reply_markup=reply_markup
     )
+    return ConversationHandler.END
 
 
 async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -466,6 +467,7 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             text=response_message,
             reply_markup=reply_markup
         )
+    return ConversationHandler.END
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -474,19 +476,21 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     #help_content = rf'You can find the documentation <a href="{help_url}">here</a>'
     help_content = rf'Coming soon...'
     await update.message.reply_html(text=rf'tg-emoji emoji-id="1">{emoji.emojize(":light_bulb:")}</tg-emoji> {help_content}.')
+    return ConversationHandler.END
 
 
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Echo the user message."""
     log.info(f'Incoming message from Telegram user ID {update.effective_user.id}.')
     await update.message.reply_text(update.message.text)
+    return ConversationHandler.END
 
 
 async def pick_from_pocket(update: Update, context: ContextTypes.DEFAULT_TYPE, pick_type=PICK_TYPE_UNREAD, tag=None) -> String:
     user: TelegramUser = update.effective_user
     await context.bot.send_chat_action(chat_id=update.effective_message.chat_id, action=ChatAction.TYPING)
     pocket_user: User = await get_user_registration(telegram_user_id=user.id)
-    user_keyboard_header = None
+    user_follow_up = None
     user_keyboard = None
     item_id = None
     if pocket_user is None or pocket_user.pocket_access_token is None:
@@ -518,16 +522,11 @@ async def pick_from_pocket(update: Update, context: ContextTypes.DEFAULT_TYPE, p
         elif pick_type == PICK_TYPE_TAGGING:
             items = pocket_instance.get(tag=tag, sort=sort_order, detailType='complete', count=1, offset=offset)
             if tag == DEFAULT_TAG_UNTAGGED:
-                user_keyboard_header = rf'<tg-emoji emoji-id="1">{emoji.emojize(":bookmark_tabs:")}</tg-emoji> Update Pocket?'
-                user_keyboard = [
-                    [
-                        InlineKeyboardButton("Add Tags", callback_data=ACTION_POCKET_TAG)
-                    ],
-                ]
+                user_follow_up = rf'<tg-emoji emoji-id="1">{emoji.emojize(":light_bulb:")}</tg-emoji> Send a space-separated list of words to use as tags, if you want to tag this.'
         elif pick_type == PICK_TYPE_UNREAD:
             items = pocket_instance.get(sort=sort_order, detailType='complete', count=1, offset=offset)
             if not auto_archive:
-                user_keyboard_header = rf'<tg-emoji emoji-id="1">{emoji.emojize(":bookmark_tabs:")}</tg-emoji> Update Pocket?'
+                user_follow_up = rf'<tg-emoji emoji-id="1">{emoji.emojize(":bookmark_tabs:")}</tg-emoji> Update Pocket?'
                 user_keyboard = [
                     [
                         InlineKeyboardButton("Archive", callback_data=ACTION_POCKET_ARCHIVE),
@@ -565,7 +564,6 @@ async def pick_from_pocket(update: Update, context: ContextTypes.DEFAULT_TYPE, p
             else:
                 log.debug(f'Pocket response items {items[0]!s}')
                 real_items = items[0]['list']
-                item_id = item_data['item_id']
                 item_url = None
                 item_title = None
                 item_detail = None
@@ -573,6 +571,7 @@ async def pick_from_pocket(update: Update, context: ContextTypes.DEFAULT_TYPE, p
                 item_tags = None
                 for item_key, item_data in real_items.items():
                     log.debug(f'{item_key=}: {item_data!s}')
+                    item_id = item_data['item_id']
                     item_url = item_data['given_url']
                     if 'given_title' in item_data.keys():
                         item_title = item_data['given_title']
@@ -607,10 +606,14 @@ async def pick_from_pocket(update: Update, context: ContextTypes.DEFAULT_TYPE, p
         text=response_message,
         parse_mode=ParseMode.HTML
     )
-    if user_keyboard and user_keyboard_header:
+    if user_follow_up and user_keyboard is None:
+        await update.message.reply_html(
+            text=user_follow_up,
+        )
+    elif user_keyboard is not None:
         reply_markup = InlineKeyboardMarkup(user_keyboard)
         await update.message.reply_html(
-            text=user_keyboard_header,
+            text=user_follow_up,
             reply_markup=reply_markup
         )
     return item_id
@@ -623,6 +626,7 @@ async def pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     log.info(f'/pick for Telegram user ID {user.id}...')
     await pick_from_pocket(update=update, context=context)
+    return ConversationHandler.END
 
 
 async def archived(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -632,6 +636,7 @@ async def archived(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     log.info(f'/archived for Telegram user ID {user.id}...')
     await pick_from_pocket(update=update, context=context, pick_type=PICK_TYPE_ARCHIVED)
+    return ConversationHandler.END
 
 
 async def favorite(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -641,6 +646,7 @@ async def favorite(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     log.info(f'/favorite for Telegram user ID {user.id}...')
     await pick_from_pocket(update=update, context=context, pick_type=PICK_TYPE_FAVORITE)
+    return ConversationHandler.END
 
 
 async def untagged(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -649,7 +655,10 @@ async def untagged(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         log.warning(f'Ignoring bot user {user.id}.')
         return
     log.info(f'/untagged for Telegram user ID {user.id}...')
-    await pick_from_pocket(update=update, context=context, pick_type=PICK_TYPE_TAGGING, tag=DEFAULT_TAG_UNTAGGED)
+    item_id = await pick_from_pocket(update=update, context=context, pick_type=PICK_TYPE_TAGGING, tag=DEFAULT_TAG_UNTAGGED)
+    log.debug(f'Returned untagged Pocket item ID {item_id} for tagging context handler.')
+    context.user_data['pocket_item_id'] = item_id
+    return ACTION_TAG
 
 
 async def tagged(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -664,6 +673,7 @@ async def tagged(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_html(
             text=rf'<tg-emoji emoji-id="1">{emoji.emojize(":light_bulb:")}</tg-emoji> Add a tag to this command like <pre>/tagged fun</pre>.',
         )
+    return ConversationHandler.END
 
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -673,6 +683,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Some clients may have trouble otherwise. See https://core.telegram.org/bots/api#callbackquery
     await query.answer()
     await query.edit_message_text(text=f"Selected option: {query.data}")
+    return ConversationHandler.END
 
 
 async def configure(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -699,6 +710,7 @@ async def configure(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await query.edit_message_text(
         text=f'{emoji.emojize(":check_mark_button:")} Settings updated.',
         parse_mode=ParseMode.MARKDOWN)
+    return ConversationHandler.END
 
 
 async def registration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -728,25 +740,29 @@ async def registration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             'Pocket before using this link due to a bug in the Pocket web authorization ' \
             'workflow.',
         parse_mode=ParseMode.MARKDOWN)
+    return ConversationHandler.END
 
 
 async def tag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if 'pocket_item_id' not in context.user_data.keys():
+        log.warning(f'Unable to tag without an item ID present.')
+        return ConversationHandler.END
     await context.bot.send_chat_action(chat_id=update.effective_message.chat_id, action=ChatAction.TYPING)
     user: TelegramUser = update.effective_user
     tag_string: str = update.message.text
     for mark in string.punctuation:
         if mark in tag_string:
-            await update.message.reply_text(f'Do not include {mark}. Just a list of words separated by spaces.')
+            await update.message.reply_text(f'Do not include symbols like "{mark}". Just a list of words separated by spaces.')
             return ACTION_TAG
     tag_words = tag_string.split(' ')
     tags = []
     for tag_word in tag_words:
         tags.append(tag_word.strip())
-    log.debug(f'Telegram user ID {user.id} adds {len(tags)}.')
-    pocket_tags = ','.join(tags)
+    item_id = int(context.user_data['pocket_item_id'])
+    log.debug(f'Telegram user ID {user.id} adds {len(tags)} tags to item {item_id}.')
     pocket_user: User = await get_user_registration(telegram_user_id=user.id)
     pocket_instance = Pocket(creds.pocket_api_consumer_key, pocket_user.pocket_access_token)
-    pocket_instance.tags_add()
+    pocket_instance.tags_add(item_id=item_id, tags=','.join(tags)).commit()
     await update.message.reply_text(f'{len(tags)} tag(s) added to this Pocket link.')
     return ConversationHandler.END
 
@@ -758,11 +774,13 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Some clients may have trouble otherwise. See https://core.telegram.org/bots/api#callbackquery
     await query.answer()
     await query.edit_message_text(text=f"No changes made.")
+    return ConversationHandler.END
 
 
 async def telegram_error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # do not capture because there's nothing to handle
     log.warning(msg="Telegram Bot Exception while handling an update:", exc_info=context.error)
+    return ConversationHandler.END
 
 
 async def webhook_update(update: WebhookUpdate, context: CustomContext) -> None:
@@ -903,30 +921,29 @@ def main():
         context_types = ContextTypes(context=CustomContext)
         application = Application.builder().token(creds.telegram_bot_api_token).context_types(context_types).build()
         application.bot_data["callback_url"] = ngrok_tunnel_url
-        # on different commands - answer in Telegram
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CallbackQueryHandler(callback=configure, pattern=f'^{ACTION_SETTINGS_PREFIX}.*$'))
-        application.add_handler(CallbackQueryHandler(callback=registration, pattern="^" + str(ACTION_AUTHORIZE) + "$"))
-        application.add_handler(CallbackQueryHandler(callback=cancel, pattern="^" + str(ACTION_NONE) + "$"))
-        application.add_handler(CommandHandler("help", help_command))
-        application.add_handler(CommandHandler("settings", settings))
         # pocket commands
-        application.add_handler(CommandHandler("pick", pick))
-        application.add_handler(CommandHandler("archived", archived))
-        application.add_handler(CommandHandler("favorite", favorite))
-        application.add_handler(CommandHandler("untagged", untagged))
-        application.add_handler(CommandHandler("tagged", tagged))
-        # tagging
-        # Add conversation handler with the states GENDER, PHOTO, LOCATION and BIO
+        command_handlers = [
+            CommandHandler("start", start),
+            CommandHandler("help", help_command),
+            CommandHandler("pick", pick),
+            CommandHandler("archived", archived),
+            CommandHandler("favorite", favorite),
+            CommandHandler("tagged", tagged),
+            CallbackQueryHandler(callback=configure, pattern=f'^{ACTION_SETTINGS_PREFIX}.*$'),
+            CallbackQueryHandler(callback=registration, pattern="^" + str(ACTION_AUTHORIZE) + "$"),
+            CallbackQueryHandler(callback=cancel, pattern="^" + str(ACTION_NONE) + "$")
+        ]
         tag_handler = ConversationHandler(
+            allow_reentry=True,
             entry_points=[CommandHandler("untagged", untagged)],
             states={
                 ACTION_TAG: [MessageHandler(filters.TEXT & ~filters.COMMAND, tag)],
             },
-            fallbacks=[CommandHandler("cancel", cancel)],
+            fallbacks=command_handlers
         )
         application.add_handler(tag_handler)
-
+        for handler in command_handlers:
+            application.add_handler(handler)
         # on non command i.e message - echo the message on Telegram
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
         application.add_handler(TypeHandler(type=WebhookUpdate, callback=webhook_update))
