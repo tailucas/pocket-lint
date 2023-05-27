@@ -7,6 +7,7 @@ import emoji
 import hashlib
 import requests
 import simplejson as json
+import string
 import time
 import threading
 import urllib.parse
@@ -128,6 +129,8 @@ SORT_OLDEST = 0
 ACTION_SETTINGS_SORT_OLDEST = f'{ACTION_SETTINGS_PREFIX}_sort_{SORT_OLDEST}'
 ACTION_SETTINGS_AUTO_ARCHIVE_ON = f'{ACTION_SETTINGS_PREFIX}_autoarchive_on'
 ACTION_SETTINGS_AUTO_ARCHIVE_OFF = f'{ACTION_SETTINGS_PREFIX}_autoarchive_off'
+
+ACTION_TAG = 3
 ACTION_AUTHORIZE = 2
 ACTION_NONE = 0
 
@@ -467,7 +470,10 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /help is issued."""
-    await update.message.reply_text("Coming soon...")
+    help_url = app_config.get('telegram', 'help_url')
+    #help_content = rf'You can find the documentation <a href="{help_url}">here</a>'
+    help_content = rf'Coming soon...'
+    await update.message.reply_html(text=rf'tg-emoji emoji-id="1">{emoji.emojize(":light_bulb:")}</tg-emoji> {help_content}.')
 
 
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -482,6 +488,7 @@ async def pick_from_pocket(update: Update, context: ContextTypes.DEFAULT_TYPE, p
     pocket_user: User = await get_user_registration(telegram_user_id=user.id)
     user_keyboard_header = None
     user_keyboard = None
+    item_id = None
     if pocket_user is None or pocket_user.pocket_access_token is None:
         response_message = rf'{emoji.emojize(":passport_control:")} {user.first_name}, authorization with your Pocket account is needed first. Use /start.'
     else:
@@ -497,6 +504,10 @@ async def pick_from_pocket(update: Update, context: ContextTypes.DEFAULT_TYPE, p
         else:
             sort_order = user_prefs.sort_order
             auto_archive = user_prefs.auto_archive
+        if sort_order == SORT_NEWEST:
+            sort_order = 'newest'
+        else:
+            sort_order = 'oldest'
         log.debug(f'Fetching item {pick_type=} using {offset=}, {sort_order=}, {auto_archive=}')
         pocket_instance = Pocket(creds.pocket_api_consumer_key, pocket_user.pocket_access_token)
         # FIXME: bit masking
@@ -526,40 +537,72 @@ async def pick_from_pocket(update: Update, context: ContextTypes.DEFAULT_TYPE, p
         else:
             log.warning(f'No valid pick type selected: {pick_type}.')
             return
-        if len(items) == 0 or len(items[0]['list']) == 0:
-            response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":floppy_disk:")}</tg-emoji> No links found, sorry.'
-        else:
-            log.debug(f'Pocket response {items!s}')
-            real_items = items[0]['list']
-            item_url = None
-            item_title = None
-            item_detail = None
-            item_read_time = None
-            item_tags = None
-            for item_key, item_data in real_items.items():
-                log.debug(f'{item_key=}: {item_data!s}')
-                item_url = item_data['given_url']
-                if 'given_title' in item_data.keys():
-                    item_title = item_data['given_title']
-                if 'excerpt' in item_data.keys():
-                    item_detail = item_data['excerpt']
-                if 'time_to_read' in item_data.keys():
-                    item_read_time = item_data['time_to_read']
-                if 'tags' in item_data.keys():
-                    item_tags = item_data['tags'].keys()
-            if item_title:
-                response_message = rf'<a href="{item_url}">{item_title}</a>'
-                if item_detail:
-                    response_message += rf': <i>{item_detail}</i>'
-                if item_read_time:
-                    response_message += rf' ({item_read_time} minute read)'
+        status: str = None
+        # extract and log headers
+        if len(items) == 2:
+            h: dict = items[1]
+            log.debug(f'Pocket response headers ({len(h)}): {h.keys()}')
+            source = h['X-Source']
+            status = h['Status']
+            server = h['Server']
+            cache = h['X-Cache']
+            cdn_pop = h['X-Amz-Cf-Pop']
+            limit_user = h['X-Limit-User-Limit']
+            limit_user_remain = h['X-Limit-User-Remaining']
+            limit_user_reset = h['X-Limit-User-Reset']
+            limit_key = h['X-Limit-Key-Limit']
+            limit_key_remain = h['X-Limit-Key-Remaining']
+            limit_key_reset = h['X-Limit-Key-Reset']
+            log.debug(f'{status} from {source} served by {server} ({cache} via {cdn_pop}). ' \
+                      f'User limits: {limit_user_remain} of {limit_user} (resets {limit_user_reset}). ' \
+                        f'Key limits: {limit_key_remain} of {limit_key} (resets {limit_key_reset}).')
+            for k,v in h.items():
+                if k.startswith('X-Limit'):
+                    influxdb_write(point_name='pocket', field_name=k, field_value=int(v))
+        if status.startswith('200'):
+            if len(items) == 0 or len(items[0]['list']) == 0:
+                response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":floppy_disk:")}</tg-emoji> No links found, sorry.'
             else:
-                response_message = rf'{item_url}'
-            if item_tags:
-                tag_list = ', '.join(sorted(item_tags))
-                response_message += rf' tags: <b>{tag_list}</b>'
-            log.debug(f'Saving {pick_type=} offset to DB {offset=}, tagged? {tag is not None}')
-            await update_offset(telegram_user_id=pocket_user.telegram_user_id, pick_type=pick_type, tag=tag, offset=offset)
+                log.debug(f'Pocket response items {items[0]!s}')
+                real_items = items[0]['list']
+                item_id = item_data['item_id']
+                item_url = None
+                item_title = None
+                item_detail = None
+                item_read_time = None
+                item_tags = None
+                for item_key, item_data in real_items.items():
+                    log.debug(f'{item_key=}: {item_data!s}')
+                    item_url = item_data['given_url']
+                    if 'given_title' in item_data.keys():
+                        item_title = item_data['given_title']
+                    if 'excerpt' in item_data.keys():
+                        item_detail = item_data['excerpt']
+                    if 'time_to_read' in item_data.keys():
+                        item_read_time = item_data['time_to_read']
+                    if 'tags' in item_data.keys():
+                        item_tags = item_data['tags'].keys()
+                if item_title:
+                    response_message = rf'<a href="{item_url}">{item_title}</a>'
+                    if item_detail:
+                        response_message += rf': <i>{item_detail}</i>'
+                    if item_read_time:
+                        response_message += rf' ({item_read_time} minute read)'
+                else:
+                    response_message = rf'{item_url}'
+                if item_tags:
+                    tag_list = ', '.join(sorted(item_tags))
+                    response_message += rf' tags: <b>{tag_list}</b>'
+                log.debug(f'Saving {pick_type=} offset to DB {offset=}, tagged? {tag is not None}')
+                await update_offset(telegram_user_id=pocket_user.telegram_user_id, pick_type=pick_type, tag=tag, offset=offset)
+        else:
+            log.warning(f'Bad status from Pocket {status}.')
+            response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":stop_sign:")}</tg-emoji> Sorry, please try again later.'
+            # https://getpocket.com/developer/docs/errors
+            if status.startswith('401'):
+                response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":stop_sign:")}</tg-emoji> Permissions problem. Try /start command.'
+            elif status.startswith('503'):
+                response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":construction:")}</tg-emoji> Pocket server is down for maintenance.'
     await update.message.reply_text(
         text=response_message,
         parse_mode=ParseMode.HTML
@@ -570,6 +613,7 @@ async def pick_from_pocket(update: Update, context: ContextTypes.DEFAULT_TYPE, p
             text=user_keyboard_header,
             reply_markup=reply_markup
         )
+    return item_id
 
 
 async def pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -684,6 +728,27 @@ async def registration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             'Pocket before using this link due to a bug in the Pocket web authorization ' \
             'workflow.',
         parse_mode=ParseMode.MARKDOWN)
+
+
+async def tag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await context.bot.send_chat_action(chat_id=update.effective_message.chat_id, action=ChatAction.TYPING)
+    user: TelegramUser = update.effective_user
+    tag_string: str = update.message.text
+    for mark in string.punctuation:
+        if mark in tag_string:
+            await update.message.reply_text(f'Do not include {mark}. Just a list of words separated by spaces.')
+            return ACTION_TAG
+    tag_words = tag_string.split(' ')
+    tags = []
+    for tag_word in tag_words:
+        tags.append(tag_word.strip())
+    log.debug(f'Telegram user ID {user.id} adds {len(tags)}.')
+    pocket_tags = ','.join(tags)
+    pocket_user: User = await get_user_registration(telegram_user_id=user.id)
+    pocket_instance = Pocket(creds.pocket_api_consumer_key, pocket_user.pocket_access_token)
+    pocket_instance.tags_add()
+    await update.message.reply_text(f'{len(tags)} tag(s) added to this Pocket link.')
+    return ConversationHandler.END
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -851,6 +916,16 @@ def main():
         application.add_handler(CommandHandler("favorite", favorite))
         application.add_handler(CommandHandler("untagged", untagged))
         application.add_handler(CommandHandler("tagged", tagged))
+        # tagging
+        # Add conversation handler with the states GENDER, PHOTO, LOCATION and BIO
+        tag_handler = ConversationHandler(
+            entry_points=[CommandHandler("untagged", untagged)],
+            states={
+                ACTION_TAG: [MessageHandler(filters.TEXT & ~filters.COMMAND, tag)],
+            },
+            fallbacks=[CommandHandler("cancel", cancel)],
+        )
+        application.add_handler(tag_handler)
 
         # on non command i.e message - echo the message on Telegram
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
