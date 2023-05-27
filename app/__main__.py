@@ -618,8 +618,8 @@ async def pick_from_pocket(update: Update, context: ContextTypes.DEFAULT_TYPE, p
             text=user_follow_up,
             reply_markup=reply_markup
         )
-    # auto-archive
-    if item_id and user_prefs.auto_archive:
+    # auto-archive if not already archived
+    if pick_type != PICK_TYPE_ARCHIVED and item_id and user_prefs.auto_archive:
         log.debug(f'Auto-archive of Pocket item {item_id} based on user-preference.')
         pocket_instance.archive(item_id=item_id).commit()
     return item_id
@@ -954,6 +954,7 @@ def main():
         # pocket commands
         command_handlers = [
             CommandHandler("start", start),
+            CommandHandler("settings", settings),
             CommandHandler("help", help_command),
             CommandHandler("pick", pick),
             CommandHandler("archived", archived),
