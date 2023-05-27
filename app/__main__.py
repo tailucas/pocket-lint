@@ -129,6 +129,7 @@ SORT_OLDEST = 0
 ACTION_SETTINGS_SORT_OLDEST = f'{ACTION_SETTINGS_PREFIX}_sort_{SORT_OLDEST}'
 ACTION_SETTINGS_AUTO_ARCHIVE_ON = f'{ACTION_SETTINGS_PREFIX}_autoarchive_on'
 ACTION_SETTINGS_AUTO_ARCHIVE_OFF = f'{ACTION_SETTINGS_PREFIX}_autoarchive_off'
+ACTION_RESET_PICK_OFFSET = "reset_pick_offset"
 
 ACTION_TAG = 3
 ACTION_AUTHORIZE = 2
@@ -561,6 +562,17 @@ async def pick_from_pocket(update: Update, context: ContextTypes.DEFAULT_TYPE, p
         if status.startswith('200'):
             if len(items) == 0 or len(items[0]['list']) == 0:
                 response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":floppy_disk:")}</tg-emoji> No links found, sorry.'
+                if offset > 0:
+                    user_follow_up = rf'<tg-emoji emoji-id="1">{emoji.emojize(":light_bulb:")}</tg-emoji> Try resetting the index for this pick type.'
+                    user_keyboard = [
+                        [
+                            InlineKeyboardButton("Reset", callback_data=ACTION_RESET_PICK_OFFSET),
+                            InlineKeyboardButton("Cancel", callback_data=str(ACTION_NONE))
+                        ],
+                    ]
+                    context.user_data['user_id'] = pocket_user.id
+                    context.user_data['pick_type'] = pick_type
+                    context.user_data['tag'] = tag
             else:
                 log.debug(f'Pocket response items {items[0]!s}')
                 real_items = items[0]['list']
@@ -770,6 +782,28 @@ async def pocket(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     return ConversationHandler.END
 
 
+async def reset_pick_offset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Parses the CallbackQuery and updates the message text."""
+    user: TelegramUser = update.effective_user
+    log.info(f'Resetting pick offset for Telegram user ID {user.id}.')
+    query = update.callback_query
+    # CallbackQueries need to be answered, even if no notification to the user is needed
+    # Some clients may have trouble otherwise. See https://core.telegram.org/bots/api#callbackquery
+    await query.answer()
+    if 'user_id' not in context.user_data.keys():
+        log.warning(f'Unable to reset without an user ID present.')
+        return ConversationHandler.END
+    await context.bot.send_chat_action(chat_id=update.effective_message.chat_id, action=ChatAction.TYPING)
+    user_id = int(context.user_data['user_id'])
+    pick_type = int(context.user_data['pick_type'])
+    tag = context.user_data['tag']
+    await update_offset(user_id=user_id, pick_type=pick_type, tag=tag, offset=0)
+    await query.edit_message_text(
+        text=f'{emoji.emojize(":check_mark_button:")} Index reset.',
+        parse_mode=ParseMode.MARKDOWN)
+    return ConversationHandler.END
+
+
 async def tag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if 'pocket_item_id' not in context.user_data.keys():
         log.warning(f'Unable to tag without an item ID present.')
@@ -963,6 +997,7 @@ def main():
             CallbackQueryHandler(callback=configure, pattern=f'^{ACTION_SETTINGS_PREFIX}.*$'),
             CallbackQueryHandler(callback=registration, pattern="^" + str(ACTION_AUTHORIZE) + "$"),
             CallbackQueryHandler(callback=pocket, pattern=f'^{ACTION_POCKET_PREFIX}.*$'),
+            CallbackQueryHandler(callback=reset_pick_offset, pattern=f'^{ACTION_RESET_PICK_OFFSET}$'),
             CallbackQueryHandler(callback=cancel, pattern="^" + str(ACTION_NONE) + "$")
         ]
         tag_handler = ConversationHandler(
