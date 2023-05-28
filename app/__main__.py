@@ -214,13 +214,6 @@ class UserPref(object):
             self.auto_archive = False
 
 
-class DbItem(Base):
-    __tablename__ = 'items'
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(Integer, ForeignKey('users.id'), index=True)
-    url_digest = (Column(String(96), index=True))
-
-
 class DbPickOffset(Base):
     __tablename__ = 'pick_offsets'
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -312,10 +305,6 @@ class PocketDB(object):
             await self._reset_pick_offset(user_id=db_user.id)
         else:
             log.warning(f'No DB user to support item for Telegram user ID {telegram_user_id}, {sort_order=}')
-
-    async def _get_db_item(self, user_id: int) -> DbItem:
-        q = await self.db_session.execute(select(DbItem).where(DbItem.user_id==user_id))
-        return q.scalars().one_or_none()
 
     async def _reset_pick_offset(self, user_id: int) -> None:
         log.debug(f'Resetting pick offsets for DB user {user_id}')
@@ -843,8 +832,6 @@ async def webhook_update(update: WebhookUpdate, context: CustomContext) -> None:
 async def startup():
     # create db tables
     async with engine.begin() as conn:
-        #log.debug('Dropping database all schema...')
-        #await conn.run_sync(Base.metadata.drop_all)
         log.debug('Creating database schema...')
         await conn.run_sync(Base.metadata.create_all)
 
@@ -858,13 +845,6 @@ async def get_user_registration(telegram_user_id: int) -> User:
         async with session.begin():
             pdb = PocketDB(session)
             return await pdb.get_user_registration(telegram_user_id=telegram_user_id)
-
-
-async def get_item(user_id: int) -> DbItem:
-    async with async_session() as session:
-        async with session.begin():
-            pdb = PocketDB(session)
-            return await pdb._get_db_item(user_id=user_id)
 
 
 async def store_request_token(telegram_user_id: int, pocket_request_token: str):
