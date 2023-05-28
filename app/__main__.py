@@ -433,7 +433,7 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if db_user is None:
         return
     response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":gear:")}</tg-emoji> ' \
-        f'{user.first_name}, hanging sort order will reset your pick positions. ' \
+        f'{user.first_name}, changing sort order will reset your pick positions. ' \
         'Auto-archive updates Pocket when picking a link to archive the item.'
     user_keyboard = [
         [
@@ -667,15 +667,6 @@ async def tagged(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     return ConversationHandler.END
 
 
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    # CallbackQueries need to be answered, even if no notification to the user is needed
-    # Some clients may have trouble otherwise. See https://core.telegram.org/bots/api#callbackquery
-    await query.answer()
-    await query.edit_message_text(text=f"Selected option: {query.data}")
-    return ConversationHandler.END
-
-
 async def configure(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user: TelegramUser = update.effective_user
     db_user: User = await validate(command_name='configure', update=update)
@@ -763,7 +754,6 @@ async def reset_pick_offset(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if 'user_id' not in context.user_data.keys():
         log.warning(f'Unable to reset without an user ID present.')
         return ConversationHandler.END
-    await context.bot.send_chat_action(chat_id=update.effective_message.chat_id, action=ChatAction.TYPING)
     user_id = int(context.user_data['user_id'])
     pick_type = int(context.user_data['pick_type'])
     tag = context.user_data['tag']
@@ -782,7 +772,6 @@ async def tag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if 'pocket_item_id' not in context.user_data.keys():
         log.warning(f'Unable to tag without an item ID present.')
         return ConversationHandler.END
-    await context.bot.send_chat_action(chat_id=update.effective_message.chat_id, action=ChatAction.TYPING)
     tag_string: str = update.message.text
     for mark in string.punctuation:
         if mark in tag_string:
@@ -816,8 +805,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def telegram_error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # do not capture because there's nothing to handle
-    log.warning(msg="Telegram Bot Exception while handling an update:", exc_info=context.error)
+    log.warning(msg="Bot error:", exc_info=context.error)
     return ConversationHandler.END
 
 
