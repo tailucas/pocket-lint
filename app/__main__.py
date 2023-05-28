@@ -380,13 +380,20 @@ class CustomContext(CallbackContext[ExtBot, dict, dict, dict]):
         return super().from_update(update, application)
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send a message when the command /start is issued."""
+def validate(command_name: str, update: Update) -> TelegramUser:
     user: TelegramUser = update.effective_user
     if user.is_bot:
-        log.warning(f'Ignoring bot user {user.id}.')
+        log.warning(f'{command_name}: ignoring bot user {user.id}.')
         return
-    log.info(f'Fetching registration data for Telegram user ID {user.id} (language {user.language_code}).')
+    log.info(f'{command_name}: Telegram user ID {user.id} (language {user.language_code}).')
+    influxdb_write('command', f'{command_name}', 1)
+    return user
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user: TelegramUser = validate(command_name='start', update=update)
+    if user is None:
+        return
     pocket_user: User = await get_user_registration(telegram_user_id=user.id)
     user_response = None
     user_keyboard = []
@@ -417,12 +424,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send a message when the command /settings is issued."""
-    user: TelegramUser = update.effective_user
-    if user.is_bot:
-        log.warning(f'Ignoring bot user {user.id}.')
+    user: TelegramUser = validate(command_name='settings', update=update)
+    if user is None:
         return
-    log.info(f'Showing settings for Telegram user ID {user.id} (language {user.language_code}).')
     pocket_user: User = await get_user_registration(telegram_user_id=user.id)
     if pocket_user is None or pocket_user.pocket_access_token is None:
         response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":passport_control:")}</tg-emoji> {user.first_name}, authorization with your Pocket account is needed first. Use /start.'
@@ -457,7 +461,9 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send a message when the command /help is issued."""
+    user: TelegramUser = validate(command_name='help', update=update)
+    if user is None:
+        return
     help_url = app_config.get('telegram', 'help_url')
     #help_content = rf'You can find the documentation <a href="{help_url}">here</a>'
     help_content = rf'Coming soon...'
@@ -466,7 +472,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Echo the user message."""
     log.info(f'Incoming message from Telegram user ID {update.effective_user.id}.')
     await update.message.reply_text(update.message.text)
     return ConversationHandler.END
@@ -620,41 +625,33 @@ async def pick_from_pocket(update: Update, context: ContextTypes.DEFAULT_TYPE, p
 
 
 async def pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user: TelegramUser = update.effective_user
-    if user.is_bot:
-        log.warning(f'Ignoring bot user {user.id}.')
+    user: TelegramUser = validate(command_name='pick', update=update)
+    if user is None:
         return
-    log.info(f'/pick for Telegram user ID {user.id}...')
     await pick_from_pocket(update=update, context=context)
     return ConversationHandler.END
 
 
 async def archived(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user: TelegramUser = update.effective_user
-    if user.is_bot:
-        log.warning(f'Ignoring bot user {user.id}.')
+    user: TelegramUser = validate(command_name='archived', update=update)
+    if user is None:
         return
-    log.info(f'/archived for Telegram user ID {user.id}...')
     await pick_from_pocket(update=update, context=context, pick_type=PICK_TYPE_ARCHIVED)
     return ConversationHandler.END
 
 
 async def favorite(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user: TelegramUser = update.effective_user
-    if user.is_bot:
-        log.warning(f'Ignoring bot user {user.id}.')
+    user: TelegramUser = validate(command_name='favorite', update=update)
+    if user is None:
         return
-    log.info(f'/favorite for Telegram user ID {user.id}...')
     await pick_from_pocket(update=update, context=context, pick_type=PICK_TYPE_FAVORITE)
     return ConversationHandler.END
 
 
 async def untagged(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user: TelegramUser = update.effective_user
-    if user.is_bot:
-        log.warning(f'Ignoring bot user {user.id}.')
+    user: TelegramUser = validate(command_name='untagged', update=update)
+    if user is None:
         return
-    log.info(f'/untagged for Telegram user ID {user.id}...')
     item_id = await pick_from_pocket(update=update, context=context, pick_type=PICK_TYPE_TAGGING, tag=DEFAULT_TAG_UNTAGGED)
     log.debug(f'Returned untagged Pocket item ID {item_id} for tagging context handler.')
     context.user_data['pocket_item_id'] = item_id
@@ -662,11 +659,9 @@ async def untagged(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def tagged(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user: TelegramUser = update.effective_user
-    if user.is_bot:
-        log.warning(f'Ignoring bot user {user.id}.')
+    user: TelegramUser = validate(command_name='tagged', update=update)
+    if user is None:
         return
-    log.info(f'/tagged for Telegram user ID {user.id}...')
     if len(context.args) == 1:
         await pick_from_pocket(update=update, context=context, pick_type=PICK_TYPE_TAGGING, tag=str(context.args[0]))
     else:
@@ -677,7 +672,6 @@ async def tagged(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Parses the CallbackQuery and updates the message text."""
     query = update.callback_query
     # CallbackQueries need to be answered, even if no notification to the user is needed
     # Some clients may have trouble otherwise. See https://core.telegram.org/bots/api#callbackquery
@@ -687,9 +681,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def configure(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Parses the CallbackQuery and updates the message text."""
-    user: TelegramUser = update.effective_user
-    log.info(f'Registration request from Telegram user ID {user.id}.')
+    user: TelegramUser = validate(command_name='configure', update=update)
+    if user is None:
+        return
     query = update.callback_query
     # CallbackQueries need to be answered, even if no notification to the user is needed
     # Some clients may have trouble otherwise. See https://core.telegram.org/bots/api#callbackquery
@@ -714,9 +708,9 @@ async def configure(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def registration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Parses the CallbackQuery and updates the message text."""
-    user: TelegramUser = update.effective_user
-    log.info(f'Registration request from Telegram user ID {user.id}.')
+    user: TelegramUser = validate(command_name='registration', update=update)
+    if user is None:
+        return
     query = update.callback_query
     # CallbackQueries need to be answered, even if no notification to the user is needed
     # Some clients may have trouble otherwise. See https://core.telegram.org/bots/api#callbackquery
@@ -744,9 +738,9 @@ async def registration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def pocket(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Parses the CallbackQuery and updates the message text."""
-    user: TelegramUser = update.effective_user
-    log.info(f'Pocket action for Telegram user ID {user.id}.')
+    user: TelegramUser = validate(command_name='pocket', update=update)
+    if user is None:
+        return
     query = update.callback_query
     # CallbackQueries need to be answered, even if no notification to the user is needed
     # Some clients may have trouble otherwise. See https://core.telegram.org/bots/api#callbackquery
@@ -765,9 +759,9 @@ async def pocket(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def reset_pick_offset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Parses the CallbackQuery and updates the message text."""
-    user: TelegramUser = update.effective_user
-    log.info(f'Resetting pick offset for Telegram user ID {user.id}.')
+    user: TelegramUser = validate(command_name='reset_pick_offset', update=update)
+    if user is None:
+        return
     query = update.callback_query
     # CallbackQueries need to be answered, even if no notification to the user is needed
     # Some clients may have trouble otherwise. See https://core.telegram.org/bots/api#callbackquery
@@ -787,11 +781,13 @@ async def reset_pick_offset(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def tag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user: TelegramUser = validate(command_name='tag', update=update)
+    if user is None:
+        return
     if 'pocket_item_id' not in context.user_data.keys():
         log.warning(f'Unable to tag without an item ID present.')
         return ConversationHandler.END
     await context.bot.send_chat_action(chat_id=update.effective_message.chat_id, action=ChatAction.TYPING)
-    user: TelegramUser = update.effective_user
     tag_string: str = update.message.text
     for mark in string.punctuation:
         if mark in tag_string:
@@ -814,7 +810,9 @@ async def tag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Parses the CallbackQuery and updates the message text."""
+    user: TelegramUser = validate(command_name='cancel', update=update)
+    if user is None:
+        return
     query = update.callback_query
     # CallbackQueries need to be answered, even if no notification to the user is needed
     # Some clients may have trouble otherwise. See https://core.telegram.org/bots/api#callbackquery
@@ -830,7 +828,6 @@ async def telegram_error_handler(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def webhook_update(update: WebhookUpdate, context: CustomContext) -> None:
-    """Callback that handles the custom updates."""
     chat_member: TelegramChatMember = await context.bot.get_chat_member(chat_id=update.user_id, user_id=update.user_id)
     telegram_user: TelegramUser = chat_member.user
     log.debug(f'Incoming oauth callback for Telegram user ID {update.user_id}.')
