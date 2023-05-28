@@ -114,7 +114,7 @@ from .bot import (
 
 
 def main():
-    log.setLevel(logging.DEBUG)
+    log.setLevel(logging.INFO)
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
