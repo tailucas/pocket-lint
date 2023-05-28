@@ -380,24 +380,15 @@ class CustomContext(CallbackContext[ExtBot, dict, dict, dict]):
         return super().from_update(update, application)
 
 
-def validate(command_name: str, update: Update) -> TelegramUser:
+async def validate(command_name: str, update: Update) -> User:
     user: TelegramUser = update.effective_user
     if user.is_bot:
         log.warning(f'{command_name}: ignoring bot user {user.id}.')
         return
     log.info(f'{command_name}: Telegram user ID {user.id} (language {user.language_code}).')
     influxdb_write('command', f'{command_name}', 1)
-    return user
-
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user: TelegramUser = validate(command_name='start', update=update)
-    if user is None:
-        return
-    pocket_user: User = await get_user_registration(telegram_user_id=user.id)
-    user_response = None
-    user_keyboard = []
-    if pocket_user is None or pocket_user.pocket_access_token is None:
+    db_user: User = await get_user_registration(telegram_user_id=user.id)
+    if db_user is None or db_user.pocket_access_token is None:
         log.info(f'No database registration found for Telegram user ID {user.id}.')
         user_response = rf'{emoji.emojize(":passport_control:")} {user.first_name}, authorization with your Pocket account is needed.'
         user_keyboard = [
@@ -406,15 +397,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 InlineKeyboardButton("Cancel", callback_data=str(ACTION_NONE))
             ]
         ]
-    else:
-        log.info(f'Found database registration for Telegram user ID {user.id}.')
-        user_response = rf'{emoji.emojize(":check_box_with_check:")} {user.first_name}, you are authorized as Pocket user "{pocket_user.pocket_username}".'
-        user_keyboard = [
-            [
-                InlineKeyboardButton("Reauthorize", callback_data=str(ACTION_AUTHORIZE)),
-                InlineKeyboardButton("Cancel", callback_data=str(ACTION_NONE))
-            ]
+        reply_markup = InlineKeyboardMarkup(user_keyboard)
+        await update.message.reply_html(
+            text=user_response,
+            reply_markup=reply_markup
+        )
+    return db_user
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user: TelegramUser = update.effective_user
+    pocket_user: User = await validate(command_name='start', update=update)
+    if pocket_user is None:
+        return
+    user_response = rf'{emoji.emojize(":check_box_with_check:")} {user.first_name}, you are authorized as Pocket user "{pocket_user.pocket_username}".'
+    user_keyboard = [
+        [
+            InlineKeyboardButton("Reauthorize", callback_data=str(ACTION_AUTHORIZE)),
+            InlineKeyboardButton("Cancel", callback_data=str(ACTION_NONE))
         ]
+    ]
     reply_markup = InlineKeyboardMarkup(user_keyboard)
     await update.message.reply_html(
         text=user_response,
@@ -424,50 +426,41 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user: TelegramUser = validate(command_name='settings', update=update)
-    if user is None:
+    user: TelegramUser = update.effective_user
+    pocket_user: User = await validate(command_name='settings', update=update)
+    if pocket_user is None:
         return
-    pocket_user: User = await get_user_registration(telegram_user_id=user.id)
-    if pocket_user is None or pocket_user.pocket_access_token is None:
-        log.info(f'No database registration found for Telegram user ID {user.id}.')
-        response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":passport_control:")}</tg-emoji> {user.first_name}, authorization with your Pocket account is needed first. Use /start.'
-        await update.message.reply_text(
-            text=response_message,
-            parse_mode=ParseMode.HTML
-        )
-    else:
-        log.info(f'Found database registration for Telegram user ID {user.id}.')
-        response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":gear:")}</tg-emoji> ' \
-            '<b>Note:</b> Changing sort order will reset your pick positions. ' \
-            'Auto-archive updates Pocket when picking a link to archive the item.'
-        user_keyboard = [
-            [
-                InlineKeyboardButton("Sort Newest", callback_data=ACTION_SETTINGS_SORT_NEWEST),
-                InlineKeyboardButton("Sort Oldest", callback_data=ACTION_SETTINGS_SORT_OLDEST)
-            ],
-            [
-                InlineKeyboardButton("Auto-archive on", callback_data=ACTION_SETTINGS_AUTO_ARCHIVE_ON),
-                InlineKeyboardButton("Auto-archive off", callback_data=ACTION_SETTINGS_AUTO_ARCHIVE_OFF)
-            ],
-            [
-                InlineKeyboardButton("Cancel", callback_data=str(ACTION_NONE))
-            ]
+    response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":gear:")}</tg-emoji> ' \
+        f'{user.first_name}, hanging sort order will reset your pick positions. ' \
+        'Auto-archive updates Pocket when picking a link to archive the item.'
+    user_keyboard = [
+        [
+            InlineKeyboardButton("Sort Newest", callback_data=ACTION_SETTINGS_SORT_NEWEST),
+            InlineKeyboardButton("Sort Oldest", callback_data=ACTION_SETTINGS_SORT_OLDEST)
+        ],
+        [
+            InlineKeyboardButton("Auto-archive on", callback_data=ACTION_SETTINGS_AUTO_ARCHIVE_ON),
+            InlineKeyboardButton("Auto-archive off", callback_data=ACTION_SETTINGS_AUTO_ARCHIVE_OFF)
+        ],
+        [
+            InlineKeyboardButton("Cancel", callback_data=str(ACTION_NONE))
         ]
-        reply_markup = InlineKeyboardMarkup(user_keyboard)
-        await update.message.reply_html(
-            text=response_message,
-            reply_markup=reply_markup
-        )
+    ]
+    reply_markup = InlineKeyboardMarkup(user_keyboard)
+    await update.message.reply_html(
+        text=response_message,
+        reply_markup=reply_markup
+    )
     return ConversationHandler.END
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user: TelegramUser = validate(command_name='help', update=update)
-    if user is None:
+    user: TelegramUser = update.effective_user
+    pocket_user: User = await validate(command_name='help', update=update)
+    if pocket_user is None:
         return
     help_url = app_config.get('telegram', 'help_url')
-    #help_content = rf'You can find the documentation <a href="{help_url}">here</a>'
-    help_content = rf'Coming soon...'
+    help_content = rf'{user.first_name}, the documentation is <a href="{help_url}">here</a>'
     await update.message.reply_html(text=rf'tg-emoji emoji-id="1">{emoji.emojize(":light_bulb:")}</tg-emoji> {help_content}.')
     return ConversationHandler.END
 
@@ -478,134 +471,131 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     return ConversationHandler.END
 
 
-async def pick_from_pocket(update: Update, context: ContextTypes.DEFAULT_TYPE, pick_type=PICK_TYPE_UNREAD, tag=None) -> String:
+async def pick_from_pocket(db_user: User, update: Update, context: ContextTypes.DEFAULT_TYPE, pick_type=PICK_TYPE_UNREAD, tag=None) -> String:
     user: TelegramUser = update.effective_user
     await context.bot.send_chat_action(chat_id=update.effective_message.chat_id, action=ChatAction.TYPING)
-    pocket_user: User = await get_user_registration(telegram_user_id=user.id)
+    # FIXME
+    pocket_user: User = db_user
     user_follow_up = None
     user_keyboard = None
     item_id = None
-    if pocket_user is None or pocket_user.pocket_access_token is None:
-        log.info(f'No database registration found for Telegram user ID {user.id}.')
-        response_message = rf'{emoji.emojize(":passport_control:")} {user.first_name}, authorization with your Pocket account is needed first. Use /start.'
+    offset = await get_offset(user_id=pocket_user.id, pick_type=pick_type, tag=tag)
+    user_prefs = await get_user_prefs(pocket_user=pocket_user)
+    if user_prefs is None:
+        log.debug(f'No user preferences found for Telegram user ID {user.id}.')
+        sort_order = DEFAULT_SORT
+        auto_archive = DEFAULT_AUTO_ARCHIVE
     else:
-        offset = await get_offset(user_id=pocket_user.id, pick_type=pick_type, tag=tag)
-        user_prefs = await get_user_prefs(pocket_user=pocket_user)
-        if user_prefs is None:
-            log.debug(f'No user preferences found for Telegram user ID {user.id}.')
-            sort_order = DEFAULT_SORT
-            auto_archive = DEFAULT_AUTO_ARCHIVE
-        else:
-            sort_order = user_prefs.sort_order
-            auto_archive = user_prefs.auto_archive
-        if sort_order == SORT_NEWEST:
-            sort_order = 'newest'
-        else:
-            sort_order = 'oldest'
-        log.debug(f'Fetching item {pick_type=} using {offset=}, {sort_order=}, {auto_archive=}')
-        pocket_instance = Pocket(creds.pocket_api_consumer_key, pocket_user.pocket_access_token)
-        log.info(f'Fetching Pocket item for Telegram user ID {user.id} (with auto-archive? {auto_archive}).')
-        # FIXME: bit masking
-        if pick_type == PICK_TYPE_ARCHIVED:
-            items = pocket_instance.get(state='archive', sort=sort_order, detailType='complete', count=1, offset=offset)
-        elif pick_type == PICK_TYPE_FAVORITE:
-            items = pocket_instance.get(favorite=1, sort=sort_order, detailType='complete', count=1, offset=offset)
-        elif pick_type == PICK_TYPE_TAGGING:
-            items = pocket_instance.get(tag=tag, sort=sort_order, detailType='complete', count=1, offset=offset)
-            if tag == DEFAULT_TAG_UNTAGGED:
-                user_follow_up = rf'<tg-emoji emoji-id="1">{emoji.emojize(":light_bulb:")}</tg-emoji> Send a space-separated list of words to use as tags, if you want to tag this.'
-        elif pick_type == PICK_TYPE_UNREAD:
-            items = pocket_instance.get(sort=sort_order, detailType='complete', count=1, offset=offset)
-            if not auto_archive:
-                user_follow_up = rf'<tg-emoji emoji-id="1">{emoji.emojize(":bookmark_tabs:")}</tg-emoji> Update Pocket?'
+        sort_order = user_prefs.sort_order
+        auto_archive = user_prefs.auto_archive
+    if sort_order == SORT_NEWEST:
+        sort_order = 'newest'
+    else:
+        sort_order = 'oldest'
+    log.debug(f'Fetching item {pick_type=} using {offset=}, {sort_order=}, {auto_archive=}')
+    pocket_instance = Pocket(creds.pocket_api_consumer_key, pocket_user.pocket_access_token)
+    log.info(f'Fetching Pocket item for Telegram user ID {user.id} (with auto-archive? {auto_archive}).')
+    # FIXME: bit masking
+    if pick_type == PICK_TYPE_ARCHIVED:
+        items = pocket_instance.get(state='archive', sort=sort_order, detailType='complete', count=1, offset=offset)
+    elif pick_type == PICK_TYPE_FAVORITE:
+        items = pocket_instance.get(favorite=1, sort=sort_order, detailType='complete', count=1, offset=offset)
+    elif pick_type == PICK_TYPE_TAGGING:
+        items = pocket_instance.get(tag=tag, sort=sort_order, detailType='complete', count=1, offset=offset)
+        if tag == DEFAULT_TAG_UNTAGGED:
+            user_follow_up = rf'<tg-emoji emoji-id="1">{emoji.emojize(":light_bulb:")}</tg-emoji> Send a space-separated list of words to use as tags, if you want to tag this.'
+    elif pick_type == PICK_TYPE_UNREAD:
+        items = pocket_instance.get(sort=sort_order, detailType='complete', count=1, offset=offset)
+        if not auto_archive:
+            user_follow_up = rf'<tg-emoji emoji-id="1">{emoji.emojize(":bookmark_tabs:")}</tg-emoji> Update Pocket?'
+            user_keyboard = [
+                [
+                    InlineKeyboardButton("Archive", callback_data=ACTION_POCKET_ARCHIVE),
+                    InlineKeyboardButton("Cancel", callback_data=str(ACTION_NONE))
+                ],
+            ]
+    else:
+        log.warning(f'No valid pick type selected: {pick_type}.')
+        return
+    status: str = None
+    # extract and log headers
+    if len(items) == 2:
+        h: dict = items[1]
+        log.debug(f'Pocket response headers ({len(h)}): {h.keys()}')
+        source = h['X-Source']
+        status = h['Status']
+        server = h['Server']
+        cache = h['X-Cache']
+        cdn_pop = h['X-Amz-Cf-Pop']
+        limit_user = h['X-Limit-User-Limit']
+        limit_user_remain = h['X-Limit-User-Remaining']
+        limit_user_reset = h['X-Limit-User-Reset']
+        limit_key = h['X-Limit-Key-Limit']
+        limit_key_remain = h['X-Limit-Key-Remaining']
+        limit_key_reset = h['X-Limit-Key-Reset']
+        log.debug(f'{status} from {source} served by {server} ({cache} via {cdn_pop}). ' \
+                    f'User limits: {limit_user_remain} of {limit_user} (resets {limit_user_reset}). ' \
+                    f'Key limits: {limit_key_remain} of {limit_key} (resets {limit_key_reset}).')
+        for k,v in h.items():
+            if k.startswith('X-Limit'):
+                influxdb_write(point_name='pocket', field_name=k, field_value=int(v))
+    if status.startswith('200'):
+        if len(items) == 0 or len(items[0]['list']) == 0:
+            response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":floppy_disk:")}</tg-emoji> No links found, sorry.'
+            if offset > 0:
+                user_follow_up = rf'<tg-emoji emoji-id="1">{emoji.emojize(":light_bulb:")}</tg-emoji> Try resetting the index for this pick type.'
                 user_keyboard = [
                     [
-                        InlineKeyboardButton("Archive", callback_data=ACTION_POCKET_ARCHIVE),
+                        InlineKeyboardButton("Reset", callback_data=ACTION_RESET_PICK_OFFSET),
                         InlineKeyboardButton("Cancel", callback_data=str(ACTION_NONE))
                     ],
                 ]
+                context.user_data['user_id'] = pocket_user.id
+                context.user_data['pick_type'] = pick_type
+                context.user_data['tag'] = tag
         else:
-            log.warning(f'No valid pick type selected: {pick_type}.')
-            return
-        status: str = None
-        # extract and log headers
-        if len(items) == 2:
-            h: dict = items[1]
-            log.debug(f'Pocket response headers ({len(h)}): {h.keys()}')
-            source = h['X-Source']
-            status = h['Status']
-            server = h['Server']
-            cache = h['X-Cache']
-            cdn_pop = h['X-Amz-Cf-Pop']
-            limit_user = h['X-Limit-User-Limit']
-            limit_user_remain = h['X-Limit-User-Remaining']
-            limit_user_reset = h['X-Limit-User-Reset']
-            limit_key = h['X-Limit-Key-Limit']
-            limit_key_remain = h['X-Limit-Key-Remaining']
-            limit_key_reset = h['X-Limit-Key-Reset']
-            log.debug(f'{status} from {source} served by {server} ({cache} via {cdn_pop}). ' \
-                      f'User limits: {limit_user_remain} of {limit_user} (resets {limit_user_reset}). ' \
-                        f'Key limits: {limit_key_remain} of {limit_key} (resets {limit_key_reset}).')
-            for k,v in h.items():
-                if k.startswith('X-Limit'):
-                    influxdb_write(point_name='pocket', field_name=k, field_value=int(v))
-        if status.startswith('200'):
-            if len(items) == 0 or len(items[0]['list']) == 0:
-                response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":floppy_disk:")}</tg-emoji> No links found, sorry.'
-                if offset > 0:
-                    user_follow_up = rf'<tg-emoji emoji-id="1">{emoji.emojize(":light_bulb:")}</tg-emoji> Try resetting the index for this pick type.'
-                    user_keyboard = [
-                        [
-                            InlineKeyboardButton("Reset", callback_data=ACTION_RESET_PICK_OFFSET),
-                            InlineKeyboardButton("Cancel", callback_data=str(ACTION_NONE))
-                        ],
-                    ]
-                    context.user_data['user_id'] = pocket_user.id
-                    context.user_data['pick_type'] = pick_type
-                    context.user_data['tag'] = tag
+            log.debug(f'Pocket response items {items[0]!s}')
+            real_items = items[0]['list']
+            item_url = None
+            item_title = None
+            item_detail = None
+            item_read_time = None
+            item_tags = None
+            for item_key, item_data in real_items.items():
+                log.debug(f'{item_key=}: {item_data!s}')
+                item_id = item_data['item_id']
+                context.user_data['pocket_item_id'] = item_id
+                item_url = item_data['given_url']
+                if 'given_title' in item_data.keys():
+                    item_title = item_data['given_title']
+                if 'excerpt' in item_data.keys():
+                    item_detail = item_data['excerpt']
+                if 'time_to_read' in item_data.keys():
+                    item_read_time = item_data['time_to_read']
+                if 'tags' in item_data.keys():
+                    item_tags = item_data['tags'].keys()
+            if item_title:
+                response_message = rf'<a href="{item_url}">{item_title}</a>'
+                if item_detail:
+                    response_message += rf': <i>{item_detail}</i>'
+                if item_read_time:
+                    response_message += rf' ({item_read_time} minute read)'
             else:
-                log.debug(f'Pocket response items {items[0]!s}')
-                real_items = items[0]['list']
-                item_url = None
-                item_title = None
-                item_detail = None
-                item_read_time = None
-                item_tags = None
-                for item_key, item_data in real_items.items():
-                    log.debug(f'{item_key=}: {item_data!s}')
-                    item_id = item_data['item_id']
-                    context.user_data['pocket_item_id'] = item_id
-                    item_url = item_data['given_url']
-                    if 'given_title' in item_data.keys():
-                        item_title = item_data['given_title']
-                    if 'excerpt' in item_data.keys():
-                        item_detail = item_data['excerpt']
-                    if 'time_to_read' in item_data.keys():
-                        item_read_time = item_data['time_to_read']
-                    if 'tags' in item_data.keys():
-                        item_tags = item_data['tags'].keys()
-                if item_title:
-                    response_message = rf'<a href="{item_url}">{item_title}</a>'
-                    if item_detail:
-                        response_message += rf': <i>{item_detail}</i>'
-                    if item_read_time:
-                        response_message += rf' ({item_read_time} minute read)'
-                else:
-                    response_message = rf'{item_url}'
-                if item_tags:
-                    tag_list = ', '.join(sorted(item_tags))
-                    response_message += rf' tags: <b>{tag_list}</b>'
-                offset += 1
-                log.debug(f'Saving updated {pick_type=} offset to DB {offset=}, tagged? {tag is not None}')
-                await update_offset(user_id=pocket_user.id, pick_type=pick_type, tag=tag, offset=offset)
-        else:
-            log.warning(f'Bad status from Pocket {status}.')
-            response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":stop_sign:")}</tg-emoji> Sorry, please try again later.'
-            # https://getpocket.com/developer/docs/errors
-            if status.startswith('401'):
-                response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":stop_sign:")}</tg-emoji> Permissions problem. Try /start command.'
-            elif status.startswith('503'):
-                response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":construction:")}</tg-emoji> Pocket server is down for maintenance.'
+                response_message = rf'{item_url}'
+            if item_tags:
+                tag_list = ', '.join(sorted(item_tags))
+                response_message += rf' tags: <b>{tag_list}</b>'
+            offset += 1
+            log.debug(f'Saving updated {pick_type=} offset to DB {offset=}, tagged? {tag is not None}')
+            await update_offset(user_id=pocket_user.id, pick_type=pick_type, tag=tag, offset=offset)
+    else:
+        log.warning(f'Bad status from Pocket {status}.')
+        response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":stop_sign:")}</tg-emoji> Sorry, please try again later.'
+        # https://getpocket.com/developer/docs/errors
+        if status.startswith('401'):
+            response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":stop_sign:")}</tg-emoji> Permissions problem. Try /start command.'
+        elif status.startswith('503'):
+            response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":construction:")}</tg-emoji> Pocket server is down for maintenance.'
     await update.message.reply_text(
         text=response_message,
         parse_mode=ParseMode.HTML
@@ -628,45 +618,45 @@ async def pick_from_pocket(update: Update, context: ContextTypes.DEFAULT_TYPE, p
 
 
 async def pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user: TelegramUser = validate(command_name='pick', update=update)
-    if user is None:
+    pocket_user: User = await validate(command_name='pick', update=update)
+    if pocket_user is None:
         return
-    await pick_from_pocket(update=update, context=context)
+    await pick_from_pocket(db_user=pocket_user, update=update, context=context)
     return ConversationHandler.END
 
 
 async def archived(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user: TelegramUser = validate(command_name='archived', update=update)
-    if user is None:
+    pocket_user: User = await validate(command_name='archived', update=update)
+    if pocket_user is None:
         return
-    await pick_from_pocket(update=update, context=context, pick_type=PICK_TYPE_ARCHIVED)
+    await pick_from_pocket(db_user=pocket_user, update=update, context=context, pick_type=PICK_TYPE_ARCHIVED)
     return ConversationHandler.END
 
 
 async def favorite(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user: TelegramUser = validate(command_name='favorite', update=update)
-    if user is None:
+    pocket_user: User = await validate(command_name='favorite', update=update)
+    if pocket_user is None:
         return
     await pick_from_pocket(update=update, context=context, pick_type=PICK_TYPE_FAVORITE)
     return ConversationHandler.END
 
 
 async def untagged(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user: TelegramUser = validate(command_name='untagged', update=update)
-    if user is None:
+    pocket_user: User = await validate(command_name='untagged', update=update)
+    if pocket_user is None:
         return
-    item_id = await pick_from_pocket(update=update, context=context, pick_type=PICK_TYPE_TAGGING, tag=DEFAULT_TAG_UNTAGGED)
+    item_id = await pick_from_pocket(db_user=pocket_user, update=update, context=context, pick_type=PICK_TYPE_TAGGING, tag=DEFAULT_TAG_UNTAGGED)
     log.debug(f'Returned untagged Pocket item ID {item_id} for tagging context handler.')
     context.user_data['pocket_item_id'] = item_id
     return ACTION_TAG
 
 
 async def tagged(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user: TelegramUser = validate(command_name='tagged', update=update)
-    if user is None:
+    pocket_user: User = await validate(command_name='tagged', update=update)
+    if pocket_user is None:
         return
     if len(context.args) == 1:
-        await pick_from_pocket(update=update, context=context, pick_type=PICK_TYPE_TAGGING, tag=str(context.args[0]))
+        await pick_from_pocket(db_user=pocket_user, update=update, context=context, pick_type=PICK_TYPE_TAGGING, tag=str(context.args[0]))
     else:
         await update.message.reply_html(
             text=rf'<tg-emoji emoji-id="1">{emoji.emojize(":light_bulb:")}</tg-emoji> Add a tag to this command like <pre>/tagged fun</pre>.',
@@ -684,8 +674,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def configure(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user: TelegramUser = validate(command_name='configure', update=update)
-    if user is None:
+    user: TelegramUser = update.effective_user
+    pocket_user: User = await validate(command_name='configure', update=update)
+    if pocket_user is None:
         return
     query = update.callback_query
     # CallbackQueries need to be answered, even if no notification to the user is needed
@@ -711,8 +702,9 @@ async def configure(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def registration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user: TelegramUser = validate(command_name='registration', update=update)
-    if user is None:
+    user: TelegramUser = update.effective_user
+    pocket_user: User = await validate(command_name='registration', update=update)
+    if pocket_user is None:
         return
     query = update.callback_query
     # CallbackQueries need to be answered, even if no notification to the user is needed
@@ -741,8 +733,9 @@ async def registration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def pocket(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user: TelegramUser = validate(command_name='pocket', update=update)
-    if user is None:
+    user: TelegramUser = update.effective_user
+    pocket_user: User = await validate(command_name='pocket', update=update)
+    if pocket_user is None:
         return
     query = update.callback_query
     # CallbackQueries need to be answered, even if no notification to the user is needed
@@ -762,8 +755,8 @@ async def pocket(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def reset_pick_offset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user: TelegramUser = validate(command_name='reset_pick_offset', update=update)
-    if user is None:
+    pocket_user: User = await validate(command_name='reset_pick_offset', update=update)
+    if pocket_user is None:
         return
     query = update.callback_query
     # CallbackQueries need to be answered, even if no notification to the user is needed
@@ -784,8 +777,9 @@ async def reset_pick_offset(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def tag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user: TelegramUser = validate(command_name='tag', update=update)
-    if user is None:
+    user: TelegramUser = update.effective_user
+    pocket_user: User = await validate(command_name='tag', update=update)
+    if pocket_user is None:
         return
     if 'pocket_item_id' not in context.user_data.keys():
         log.warning(f'Unable to tag without an item ID present.')
@@ -813,8 +807,8 @@ async def tag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user: TelegramUser = validate(command_name='cancel', update=update)
-    if user is None:
+    pocket_user: User = await validate(command_name='cancel', update=update)
+    if pocket_user is None:
         return
     query = update.callback_query
     # CallbackQueries need to be answered, even if no notification to the user is needed
