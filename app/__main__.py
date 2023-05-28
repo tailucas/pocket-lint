@@ -544,7 +544,7 @@ async def pick_from_pocket(db_user: User, update: Update, context: ContextTypes.
         if len(items) == 0 or len(items[0]['list']) == 0:
             response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":floppy_disk:")}</tg-emoji> No links found, sorry.'
             if offset > 0:
-                user_follow_up = rf'<tg-emoji emoji-id="1">{emoji.emojize(":light_bulb:")}</tg-emoji> Try resetting the index for this pick type.'
+                user_follow_up = rf'<tg-emoji emoji-id="1">{emoji.emojize(":light_bulb:")}</tg-emoji> Try resetting my index for this pick type.'
                 user_keyboard = [
                     [
                         InlineKeyboardButton("Reset", callback_data=ACTION_RESET_PICK_OFFSET),
