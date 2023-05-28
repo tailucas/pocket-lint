@@ -380,28 +380,30 @@ class CustomContext(CallbackContext[ExtBot, dict, dict, dict]):
         return super().from_update(update, application)
 
 
-async def validate(command_name: str, update: Update) -> User:
+async def validate(command_name: str, update: Update, validate_registration=True) -> User:
     user: TelegramUser = update.effective_user
     if user.is_bot:
         log.warning(f'{command_name}: ignoring bot user {user.id}.')
         return
     log.info(f'{command_name}: Telegram user ID {user.id} (language {user.language_code}).')
     influxdb_write('command', f'{command_name}', 1)
-    db_user: User = await get_user_registration(telegram_user_id=user.id)
-    if db_user is None or db_user.pocket_access_token is None:
-        log.info(f'No database registration found for Telegram user ID {user.id}.')
-        user_response = rf'{emoji.emojize(":passport_control:")} {user.first_name}, authorization with your Pocket account is needed.'
-        user_keyboard = [
-            [
-                InlineKeyboardButton("Authorize", callback_data=str(ACTION_AUTHORIZE)),
-                InlineKeyboardButton("Cancel", callback_data=str(ACTION_NONE))
+    db_user = None
+    if validate_registration:
+        db_user: User = await get_user_registration(telegram_user_id=user.id)
+        if db_user is None or db_user.pocket_access_token is None:
+            log.info(f'No database registration found for Telegram user ID {user.id}.')
+            user_response = rf'{emoji.emojize(":passport_control:")} {user.first_name}, authorization with your Pocket account is needed.'
+            user_keyboard = [
+                [
+                    InlineKeyboardButton("Authorize", callback_data=str(ACTION_AUTHORIZE)),
+                    InlineKeyboardButton("Cancel", callback_data=str(ACTION_NONE))
+                ]
             ]
-        ]
-        reply_markup = InlineKeyboardMarkup(user_keyboard)
-        await update.message.reply_html(
-            text=user_response,
-            reply_markup=reply_markup
-        )
+            reply_markup = InlineKeyboardMarkup(user_keyboard)
+            await update.message.reply_html(
+                text=user_response,
+                reply_markup=reply_markup
+            )
     return db_user
 
 
@@ -704,9 +706,7 @@ async def configure(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def registration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user: TelegramUser = update.effective_user
-    db_user: User = await validate(command_name='registration', update=update)
-    if db_user is None:
-        return
+    await validate(command_name='registration', update=update, validate_registration=False)
     query = update.callback_query
     # CallbackQueries need to be answered, even if no notification to the user is needed
     # Some clients may have trouble otherwise. See https://core.telegram.org/bots/api#callbackquery
@@ -725,10 +725,8 @@ async def registration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     log.info(f'Returning pocket authorization URL to Telegram user ID {user.id}.')
     influxdb_write('bot', 'registration_oauth', 1)
     await query.edit_message_text(
-        text=f'Use [this link]({pocket_auth_url}) to authorize with Pocket. ' \
-            'Please ensure that your mobile browser is already logged into ' \
-            'Pocket before using this link due to a bug in the Pocket web authorization ' \
-            'workflow.',
+        text=f'*Step 1*: Visit https://getpocket.com/login to first log in using your mobile browser (necessary to work around a Pocket authorization bug). ' \
+            f'*Step 2*: Use [this link]({pocket_auth_url}) to authorize with Pocket.',
         parse_mode=ParseMode.MARKDOWN)
     return ConversationHandler.END
 
