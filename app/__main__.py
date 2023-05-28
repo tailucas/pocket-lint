@@ -429,6 +429,7 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     pocket_user: User = await get_user_registration(telegram_user_id=user.id)
     if pocket_user is None or pocket_user.pocket_access_token is None:
+        log.info(f'No database registration found for Telegram user ID {user.id}.')
         response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":passport_control:")}</tg-emoji> {user.first_name}, authorization with your Pocket account is needed first. Use /start.'
         await update.message.reply_text(
             text=response_message,
@@ -485,6 +486,7 @@ async def pick_from_pocket(update: Update, context: ContextTypes.DEFAULT_TYPE, p
     user_keyboard = None
     item_id = None
     if pocket_user is None or pocket_user.pocket_access_token is None:
+        log.info(f'No database registration found for Telegram user ID {user.id}.')
         response_message = rf'{emoji.emojize(":passport_control:")} {user.first_name}, authorization with your Pocket account is needed first. Use /start.'
     else:
         offset = await get_offset(user_id=pocket_user.id, pick_type=pick_type, tag=tag)
@@ -502,6 +504,7 @@ async def pick_from_pocket(update: Update, context: ContextTypes.DEFAULT_TYPE, p
             sort_order = 'oldest'
         log.debug(f'Fetching item {pick_type=} using {offset=}, {sort_order=}, {auto_archive=}')
         pocket_instance = Pocket(creds.pocket_api_consumer_key, pocket_user.pocket_access_token)
+        log.info(f'Fetching Pocket item for Telegram user ID {user.id} (with auto-archive? {auto_archive}).')
         # FIXME: bit masking
         if pick_type == PICK_TYPE_ARCHIVED:
             items = pocket_instance.get(state='archive', sort=sort_order, detailType='complete', count=1, offset=offset)
