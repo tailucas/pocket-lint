@@ -26,7 +26,7 @@ COPY config/ngrok_oauth_callback.yml ./
 COPY poetry.lock pyproject.toml ./
 RUN /opt/app/python_setup.sh
 # add the project application
-COPY app/__main__.py ./app/
+COPY app/ ./app/
 # override entrypoint
 COPY app_entrypoint.sh .
 CMD ["/opt/app/entrypoint.sh"]
