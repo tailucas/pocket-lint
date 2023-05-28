@@ -640,7 +640,7 @@ async def favorite(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     pocket_user: User = await validate(command_name='favorite', update=update)
     if pocket_user is None:
         return
-    await pick_from_pocket(update=update, context=context, pick_type=PICK_TYPE_FAVORITE)
+    await pick_from_pocket(db_user=pocket_user, update=update, context=context, pick_type=PICK_TYPE_FAVORITE)
     return ConversationHandler.END
 
 
