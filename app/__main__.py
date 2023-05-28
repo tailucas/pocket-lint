@@ -460,8 +460,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if pocket_user is None:
         return
     help_url = app_config.get('telegram', 'help_url')
-    help_content = rf'{user.first_name}, the documentation is <a href="{help_url}">here</a>'
-    await update.message.reply_html(text=rf'tg-emoji emoji-id="1">{emoji.emojize(":light_bulb:")}</tg-emoji> {help_content}.')
+    message = rf'{emoji.emojize(":light_bulb:")} {user.first_name}, the documentation is [here]({help_url}).'
+    await update.message.reply_text(
+        text=message,
+        parse_mode=ParseMode.MARKDOWN
+    )
     return ConversationHandler.END
 
 
