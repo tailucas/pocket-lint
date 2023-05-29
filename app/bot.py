@@ -1,12 +1,16 @@
 import emoji
+import string
+import urllib
 
 from pylib import (
     app_config,
     creds,
-    log
+    log,
+    threads
 )
 
 from pocket import Pocket
+from pocket import PocketException
 
 from telegram import (
     Update,
@@ -146,6 +150,9 @@ async def pick_from_pocket(db_user: User, update: Update, context: ContextTypes.
                 context.user_data['user_id'] = db_user.id
                 context.user_data['pick_type'] = pick_type
                 context.user_data['tag'] = tag
+            else:
+                user_follow_up = None
+                user_keyboard = None
         else:
             log.debug(f'Pocket response items {items[0]!s}')
             real_items = items[0]['list']
@@ -221,8 +228,11 @@ async def validate(command_name: str, update: Update, validate_registration=True
     db_user = None
     if validate_registration:
         db_user: User = await get_user_registration(telegram_user_id=user.id)
-        if db_user is None or db_user.pocket_access_token is None:
+        if db_user is None or db_user.pocket_username is None or db_user.pocket_access_token is None:
             log.info(f'No database registration found for Telegram user ID {user.id}.')
+            if update.message is None:
+                log.warning(f'Cannot update null message from Telegram user ID {user.id} with no update message context.')
+                return None
             user_response = rf'{emoji.emojize(":passport_control:")} {user.first_name}, authorization with your Pocket account is needed.'
             user_keyboard = [
                 [
@@ -235,6 +245,7 @@ async def validate(command_name: str, update: Update, validate_registration=True
                 text=user_response,
                 reply_markup=reply_markup
             )
+            return None
     return db_user
 
 
@@ -337,8 +348,10 @@ async def untagged(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     item_id = await pick_from_pocket(db_user=db_user, update=update, context=context, pick_type=PICK_TYPE_TAGGING, tag=DEFAULT_TAG_UNTAGGED)
     log.debug(f'Returned untagged Pocket item ID {item_id} for tagging context handler.')
-    context.user_data['pocket_item_id'] = item_id
-    return ACTION_TAG
+    if item_id is not None:
+        context.user_data['pocket_item_id'] = item_id
+        return ACTION_TAG
+    return ConversationHandler.END
 
 
 async def tagged(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -418,8 +431,8 @@ async def pocket(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # CallbackQueries need to be answered, even if no notification to the user is needed
     # Some clients may have trouble otherwise. See https://core.telegram.org/bots/api#callbackquery
     await query.answer()
-    if 'pocket_item_id' not in context.user_data.keys():
-        log.warning(f'Unable to tag without an item ID present.')
+    if 'pocket_item_id' not in context.user_data.keys() or context.user_data['pocket_item_id'] is None:
+        log.warning(f'Unable to archive without a Pocket item ID for Telegram user ID {user.id}.')
         return ConversationHandler.END
     item_id = int(context.user_data['pocket_item_id'])
     pocket_instance = Pocket(creds.pocket_api_consumer_key, db_user.pocket_access_token)
@@ -456,8 +469,8 @@ async def tag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     db_user: User = await validate(command_name='tag', update=update)
     if db_user is None:
         return
-    if 'pocket_item_id' not in context.user_data.keys():
-        log.warning(f'Unable to tag without an item ID present.')
+    if 'pocket_item_id' not in context.user_data.keys() or context.user_data['pocket_item_id'] is None:
+        log.warning(f'Unable to tag without an item ID present for Telegram user ID {user.id}.')
         return ConversationHandler.END
     tag_string: str = update.message.text
     for mark in string.punctuation:
@@ -480,9 +493,6 @@ async def tag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    db_user: User = await validate(command_name='cancel', update=update)
-    if db_user is None:
-        return
     query = update.callback_query
     # CallbackQueries need to be answered, even if no notification to the user is needed
     # Some clients may have trouble otherwise. See https://core.telegram.org/bots/api#callbackquery
@@ -505,7 +515,22 @@ async def webhook_update(update: WebhookUpdate, context: CustomContext) -> None:
     else:
         if db_user.pocket_access_token is None:
             log.info(f'Completing registration for Telegram user ID {update.user_id}. Fetching user access token.')
-            user_credentials = Pocket.get_credentials(consumer_key=creds.pocket_api_consumer_key, code=db_user.pocket_request_token)
+            get_credentials_backoff_secs = 1
+            while True:
+                try:
+                    # work around inevitable race condition in Pocket
+                    threads.interruptable_sleep.wait(get_credentials_backoff_secs)
+                    user_credentials = Pocket.get_credentials(consumer_key=creds.pocket_api_consumer_key, code=db_user.pocket_request_token)
+                except PocketException as e:
+                    log.debug('Still trying to get access token for Telegram user ID {update.user_id}...'.format(repr(e)))
+                    if get_credentials_backoff_secs <= 30:
+                        # exponential backoff
+                        get_credentials_backoff_secs *= 2
+                    else:
+                        raise e
+                    continue
+                if user_credentials is not None:
+                    break
             access_token = user_credentials['access_token']
             pocket_username = user_credentials['username']
             log.info(f'Storing Pocket username and access token for Telegram user ID {update.user_id}.')
