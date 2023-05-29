@@ -18,6 +18,7 @@ stderr_logfile=/dev/stderr
 EOF
 fi
 
-# Refresh local SQLite
-# TODO: uncomment
-# /opt/app/backup_db.sh
+# Refresh local SQLite if not exists
+if [ ! -f "${TABLESPACE_PATH}" ]; then
+  /opt/app/backup_db.sh
+fi
