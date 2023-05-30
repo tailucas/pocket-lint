@@ -28,7 +28,6 @@ from telegram.ext import (
 from .database import SORT_NEWEST
 from .database import SORT_OLDEST
 
-from sentry_sdk import capture_exception
 
 ACTION_POCKET_PREFIX = "pocket"
 ACTION_POCKET_ARCHIVE = f'{ACTION_POCKET_PREFIX}_archive'
@@ -122,7 +121,6 @@ async def pick_from_pocket(db_user: User, update: Update, context: ContextTypes.
         response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":stop_sign:")}</tg-emoji> Permissions problem. Try /start command.'
     except PocketException as e:
         log.warning(f'Problem with Pocket call for Telegram user ID {user.id}.', exc_info=True)
-        capture_exception(e)
         response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":stop_sign:")}</tg-emoji> Problem with Pocket. Please try again later?'
     if items is not None:
         status: str = None
@@ -532,11 +530,11 @@ async def webhook_update(update: WebhookUpdate, context: CustomContext) -> None:
         log.warning(f'Missing stored pocket request token for Telegram user ID {update.user_id}.')
     else:
         log.info(f'Completing registration for Telegram user ID {update.user_id}. Fetching user access token.')
+        user_credentials = None
         try:
             user_credentials = Pocket.get_credentials(consumer_key=creds.pocket_api_consumer_key, code=db_user.pocket_request_token)
         except PocketException as e:
-            capture_exception(e)
-            log.debug(f'Pocket error to get access token for Telegram user ID {update.user_id}: {repr(e)}...', exc_info=True)
+            log.warning(f'Pocket error to get access token for Telegram user ID {update.user_id}: {repr(e)}...', exc_info=True)
         if user_credentials is not None:
             access_token = user_credentials['access_token']
             pocket_username = user_credentials['username']
