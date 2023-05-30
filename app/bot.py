@@ -71,16 +71,10 @@ from .oauth import (
 )
 
 
-async def pick_from_pocket(db_user: User, update: Update, context: ContextTypes.DEFAULT_TYPE, pick_type=PICK_TYPE_UNREAD, tag=None) -> str:
-    user: TelegramUser = update.effective_user
-    await context.bot.send_chat_action(chat_id=update.effective_message.chat_id, action=ChatAction.TYPING)
-    user_follow_up = None
-    user_keyboard = None
-    item_id = None
-    offset = await get_offset(user_id=db_user.id, pick_type=pick_type, tag=tag)
+async def get_prefs(db_user: User) -> tuple:
     user_prefs = await get_user_prefs(db_user=db_user)
     if user_prefs is None:
-        log.debug(f'No user preferences found for Telegram user ID {user.id}.')
+        log.debug(f'No user preferences found for Telegram user ID {db_user.telegram_user_id}.')
         sort_order = DEFAULT_SORT
         auto_archive = DEFAULT_AUTO_ARCHIVE
     else:
@@ -90,6 +84,17 @@ async def pick_from_pocket(db_user: User, update: Update, context: ContextTypes.
         sort_order = 'newest'
     else:
         sort_order = 'oldest'
+    return sort_order, auto_archive
+
+
+async def pick_from_pocket(db_user: User, update: Update, context: ContextTypes.DEFAULT_TYPE, pick_type=PICK_TYPE_UNREAD, tag=None) -> str:
+    user: TelegramUser = update.effective_user
+    await context.bot.send_chat_action(chat_id=update.effective_message.chat_id, action=ChatAction.TYPING)
+    user_follow_up = None
+    user_keyboard = None
+    item_id = None
+    offset = await get_offset(user_id=db_user.id, pick_type=pick_type, tag=tag)
+    sort_order, auto_archive = await get_prefs(db_user=db_user)
     log.debug(f'Fetching item {pick_type=} using {offset=}, {sort_order=}, {auto_archive=}')
     pocket_instance = Pocket(creds.pocket_api_consumer_key, db_user.pocket_access_token)
     log.info(f'Fetching Pocket item for Telegram user ID {user.id} (with auto-archive? {auto_archive}).')
@@ -102,7 +107,7 @@ async def pick_from_pocket(db_user: User, update: Update, context: ContextTypes.
         elif pick_type == PICK_TYPE_TAGGING:
             items = pocket_instance.get(tag=tag, sort=sort_order, detailType='complete', count=1, offset=offset)
             if tag == DEFAULT_TAG_UNTAGGED:
-                user_follow_up = rf'<tg-emoji emoji-id="1">{emoji.emojize(":light_bulb:")}</tg-emoji> Send a space-separated list of words to use as tags, if you want to tag this.'
+                user_follow_up = rf'<tg-emoji emoji-id="1">{emoji.emojize(":light_bulb:")}</tg-emoji> Now send me a space-separated list of words to use as tags, if you want to tag this.'
         elif pick_type == PICK_TYPE_UNREAD:
             items = pocket_instance.get(sort=sort_order, detailType='complete', count=1, offset=offset)
             if not auto_archive:
@@ -289,9 +294,14 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     db_user: User = await validate(command_name='settings', update=update)
     if db_user is None:
         return
+    sort_order, auto_archive = await get_prefs(db_user=db_user)
+    if auto_archive:
+        auto_archive = 'ON'
+    else:
+        auto_archive = 'OFF'
     response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":gear:")}</tg-emoji> ' \
-        f'{user.first_name}, changing sort order will reset your pick positions. ' \
-        'Auto-archive updates Pocket when picking a link to archive the item.'
+        f'{user.first_name}, changing sort order (currently {sort_order} first) will reset your pick positions. ' \
+        f'Auto-archive (currently {auto_archive}) updates Pocket when picking a link to archive the item.'
     user_keyboard = [
         [
             InlineKeyboardButton("Sort Newest", callback_data=ACTION_SETTINGS_SORT_NEWEST),
