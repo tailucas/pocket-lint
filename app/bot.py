@@ -10,7 +10,7 @@ from pylib import (
 )
 
 from pocket import Pocket
-from pocket import PocketException
+from pocket import PocketException, AuthException
 
 from telegram import (
     Update,
@@ -27,6 +27,8 @@ from telegram.ext import (
 
 from .database import SORT_NEWEST
 from .database import SORT_OLDEST
+
+from sentry_sdk import capture_exception
 
 ACTION_POCKET_PREFIX = "pocket"
 ACTION_POCKET_ARCHIVE = f'{ACTION_POCKET_PREFIX}_archive'
@@ -92,110 +94,125 @@ async def pick_from_pocket(db_user: User, update: Update, context: ContextTypes.
     log.debug(f'Fetching item {pick_type=} using {offset=}, {sort_order=}, {auto_archive=}')
     pocket_instance = Pocket(creds.pocket_api_consumer_key, db_user.pocket_access_token)
     log.info(f'Fetching Pocket item for Telegram user ID {user.id} (with auto-archive? {auto_archive}).')
-    # FIXME: bit masking
-    if pick_type == PICK_TYPE_ARCHIVED:
-        items = pocket_instance.get(state='archive', sort=sort_order, detailType='complete', count=1, offset=offset)
-    elif pick_type == PICK_TYPE_FAVORITE:
-        items = pocket_instance.get(favorite=1, sort=sort_order, detailType='complete', count=1, offset=offset)
-    elif pick_type == PICK_TYPE_TAGGING:
-        items = pocket_instance.get(tag=tag, sort=sort_order, detailType='complete', count=1, offset=offset)
-        if tag == DEFAULT_TAG_UNTAGGED:
-            user_follow_up = rf'<tg-emoji emoji-id="1">{emoji.emojize(":light_bulb:")}</tg-emoji> Send a space-separated list of words to use as tags, if you want to tag this.'
-    elif pick_type == PICK_TYPE_UNREAD:
-        items = pocket_instance.get(sort=sort_order, detailType='complete', count=1, offset=offset)
-        if not auto_archive:
-            user_follow_up = rf'<tg-emoji emoji-id="1">{emoji.emojize(":bookmark_tabs:")}</tg-emoji> Update Pocket?'
-            user_keyboard = [
-                [
-                    InlineKeyboardButton("Archive", callback_data=ACTION_POCKET_ARCHIVE),
-                    InlineKeyboardButton("Cancel", callback_data=str(ACTION_NONE))
-                ],
-            ]
-    else:
-        log.warning(f'No valid pick type selected: {pick_type}.')
-        return
-    status: str = None
-    # extract and log headers
-    if len(items) == 2:
-        h: dict = items[1]
-        log.debug(f'Pocket response headers ({len(h)}): {h.keys()}')
-        source = h['X-Source']
-        status = h['Status']
-        server = h['Server']
-        cache = h['X-Cache']
-        cdn_pop = h['X-Amz-Cf-Pop']
-        limit_user = h['X-Limit-User-Limit']
-        limit_user_remain = h['X-Limit-User-Remaining']
-        limit_user_reset = h['X-Limit-User-Reset']
-        limit_key = h['X-Limit-Key-Limit']
-        limit_key_remain = h['X-Limit-Key-Remaining']
-        limit_key_reset = h['X-Limit-Key-Reset']
-        log.info(f'{status} from {source} served by {server} ({cache} via {cdn_pop}). ' \
-                    f'User limits: {limit_user_remain} of {limit_user} (resets {limit_user_reset}). ' \
-                    f'Key limits: {limit_key_remain} of {limit_key} (resets {limit_key_reset}).')
-        for k,v in h.items():
-            if k.startswith('X-Limit'):
-                influxdb.write(point_name='pocket', field_name=k, field_value=int(v))
-    if status.startswith('200'):
-        if len(items) == 0 or len(items[0]['list']) == 0:
-            response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":floppy_disk:")}</tg-emoji> No links found, sorry.'
-            if offset > 0:
-                user_follow_up = rf'<tg-emoji emoji-id="1">{emoji.emojize(":light_bulb:")}</tg-emoji> Try resetting my index for this pick type.'
+    items = None
+    try:
+        if pick_type == PICK_TYPE_ARCHIVED:
+            items = pocket_instance.get(state='archive', sort=sort_order, detailType='complete', count=1, offset=offset)
+        elif pick_type == PICK_TYPE_FAVORITE:
+            items = pocket_instance.get(favorite=1, sort=sort_order, detailType='complete', count=1, offset=offset)
+        elif pick_type == PICK_TYPE_TAGGING:
+            items = pocket_instance.get(tag=tag, sort=sort_order, detailType='complete', count=1, offset=offset)
+            if tag == DEFAULT_TAG_UNTAGGED:
+                user_follow_up = rf'<tg-emoji emoji-id="1">{emoji.emojize(":light_bulb:")}</tg-emoji> Send a space-separated list of words to use as tags, if you want to tag this.'
+        elif pick_type == PICK_TYPE_UNREAD:
+            items = pocket_instance.get(sort=sort_order, detailType='complete', count=1, offset=offset)
+            if not auto_archive:
+                user_follow_up = rf'<tg-emoji emoji-id="1">{emoji.emojize(":bookmark_tabs:")}</tg-emoji> Update Pocket?'
                 user_keyboard = [
                     [
-                        InlineKeyboardButton("Reset", callback_data=ACTION_RESET_PICK_OFFSET),
+                        InlineKeyboardButton("Archive", callback_data=ACTION_POCKET_ARCHIVE),
                         InlineKeyboardButton("Cancel", callback_data=str(ACTION_NONE))
                     ],
                 ]
-                context.user_data['user_id'] = db_user.id
-                context.user_data['pick_type'] = pick_type
-                context.user_data['tag'] = tag
-            else:
-                user_follow_up = None
-                user_keyboard = None
         else:
-            log.debug(f'Pocket response items {items[0]!s}')
-            real_items = items[0]['list']
-            item_url = None
-            item_title = None
-            item_detail = None
-            item_read_time = None
-            item_tags = None
-            for item_key, item_data in real_items.items():
-                log.debug(f'{item_key=}: {item_data!s}')
-                item_id = item_data['item_id']
-                context.user_data['pocket_item_id'] = item_id
-                item_url = item_data['given_url']
-                if 'given_title' in item_data.keys():
-                    item_title = item_data['given_title']
-                if 'excerpt' in item_data.keys():
-                    item_detail = item_data['excerpt']
-                if 'time_to_read' in item_data.keys():
-                    item_read_time = item_data['time_to_read']
-                if 'tags' in item_data.keys():
-                    item_tags = item_data['tags'].keys()
-            if item_title:
-                response_message = rf'<a href="{item_url}">{item_title}</a>'
-                if item_detail:
-                    response_message += rf': <i>{item_detail}</i>'
-                if item_read_time:
-                    response_message += rf' ({item_read_time} minute read)'
+            log.warning(f'No valid pick type selected: {pick_type}.')
+            return
+    except AuthException as e:
+        log.warning(f'Problem with Pocket call for Telegram user ID {user.id}.', exc_info=True)
+        response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":stop_sign:")}</tg-emoji> Permissions problem. Try /start command.'
+    except PocketException as e:
+        log.warning(f'Problem with Pocket call for Telegram user ID {user.id}.', exc_info=True)
+        capture_exception(e)
+        response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":stop_sign:")}</tg-emoji> Problem with Pocket. Please try again later?'
+    if items is not None:
+        status: str = None
+        # extract and log headers
+        if len(items) == 2:
+            h: dict = items[1]
+            log.debug(f'Pocket response headers ({len(h)}): {h.keys()}')
+            source = h['X-Source']
+            status = h['Status']
+            server = h['Server']
+            cache = h['X-Cache']
+            cdn_pop = h['X-Amz-Cf-Pop']
+            limit_user = None
+            if 'X-Limit-User-Limit' in h.keys():
+                limit_user = h['X-Limit-User-Limit']
+            limit_user_remain = None
+            if 'X-Limit-User-Remaining' in h.keys():
+                limit_user_remain = h['X-Limit-User-Remaining']
+            limit_user_reset = None
+            if 'X-Limit-User-Reset' in h.keys():
+                limit_user_reset = h['X-Limit-User-Reset']
+            limit_key = h['X-Limit-Key-Limit']
+            limit_key_remain = h['X-Limit-Key-Remaining']
+            limit_key_reset = h['X-Limit-Key-Reset']
+            log.info(f'{status} from {source} served by {server} ({cache} via {cdn_pop}). ' \
+                        f'User limits: {limit_user_remain} of {limit_user} (resets {limit_user_reset}). ' \
+                        f'Key limits: {limit_key_remain} of {limit_key} (resets {limit_key_reset}).')
+            for k,v in h.items():
+                if k.startswith('X-Limit'):
+                    influxdb.write(point_name='pocket', field_name=k, field_value=int(v))
+        if status.startswith('200'):
+            if len(items) == 0 or len(items[0]['list']) == 0:
+                response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":floppy_disk:")}</tg-emoji> No links found, sorry.'
+                if offset > 0:
+                    user_follow_up = rf'<tg-emoji emoji-id="1">{emoji.emojize(":light_bulb:")}</tg-emoji> Try resetting my index for this pick type.'
+                    user_keyboard = [
+                        [
+                            InlineKeyboardButton("Reset", callback_data=ACTION_RESET_PICK_OFFSET),
+                            InlineKeyboardButton("Cancel", callback_data=str(ACTION_NONE))
+                        ],
+                    ]
+                    context.user_data['user_id'] = db_user.id
+                    context.user_data['pick_type'] = pick_type
+                    context.user_data['tag'] = tag
+                else:
+                    user_follow_up = None
+                    user_keyboard = None
             else:
-                response_message = rf'{item_url}'
-            if item_tags:
-                tag_list = ', '.join(sorted(item_tags))
-                response_message += rf' tags: <b>{tag_list}</b>'
-            offset += 1
-            log.debug(f'Saving updated {pick_type=} offset to DB {offset=}, tagged? {tag is not None}')
-            await update_offset(user_id=db_user.id, pick_type=pick_type, tag=tag, offset=offset)
-    else:
-        log.warning(f'Bad status from Pocket {status}.')
-        response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":stop_sign:")}</tg-emoji> Sorry, please try again later.'
-        # https://getpocket.com/developer/docs/errors
-        if status.startswith('401'):
-            response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":stop_sign:")}</tg-emoji> Permissions problem. Try /start command.'
-        elif status.startswith('503'):
-            response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":construction:")}</tg-emoji> Pocket server is down for maintenance.'
+                log.debug(f'Pocket response items {items[0]!s}')
+                real_items = items[0]['list']
+                item_url = None
+                item_title = None
+                item_detail = None
+                item_read_time = None
+                item_tags = None
+                for item_key, item_data in real_items.items():
+                    log.debug(f'{item_key=}: {item_data!s}')
+                    item_id = item_data['item_id']
+                    context.user_data['pocket_item_id'] = item_id
+                    item_url = item_data['given_url']
+                    if 'given_title' in item_data.keys():
+                        item_title = item_data['given_title']
+                    if 'excerpt' in item_data.keys():
+                        item_detail = item_data['excerpt']
+                    if 'time_to_read' in item_data.keys():
+                        item_read_time = item_data['time_to_read']
+                    if 'tags' in item_data.keys():
+                        item_tags = item_data['tags'].keys()
+                if item_title:
+                    response_message = rf'<a href="{item_url}">{item_title}</a>'
+                    if item_detail:
+                        response_message += rf': <i>{item_detail}</i>'
+                    if item_read_time:
+                        response_message += rf' ({item_read_time} minute read)'
+                else:
+                    response_message = rf'{item_url}'
+                if item_tags:
+                    tag_list = ', '.join(sorted(item_tags))
+                    response_message += rf' tags: <b>{tag_list}</b>'
+                offset += 1
+                log.debug(f'Saving updated {pick_type=} offset to DB {offset=}, tagged? {tag is not None}')
+                await update_offset(user_id=db_user.id, pick_type=pick_type, tag=tag, offset=offset)
+        else:
+            log.warning(f'Bad status from Pocket {status}.')
+            response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":stop_sign:")}</tg-emoji> Sorry, please try again later.'
+            # https://getpocket.com/developer/docs/errors
+            if status.startswith('401'):
+                response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":stop_sign:")}</tg-emoji> Permissions problem. Try /start command.'
+            elif status.startswith('503'):
+                response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":construction:")}</tg-emoji> Pocket server is down for maintenance.'
     await update.message.reply_text(
         text=response_message,
         parse_mode=ParseMode.HTML
@@ -211,7 +228,7 @@ async def pick_from_pocket(db_user: User, update: Update, context: ContextTypes.
             reply_markup=reply_markup
         )
     # auto-archive if not already archived
-    if pick_type != PICK_TYPE_ARCHIVED and item_id and user_prefs.auto_archive:
+    if pick_type != PICK_TYPE_ARCHIVED and item_id and auto_archive:
         log.debug(f'Auto-archive of Pocket item {item_id} based on user-preference.')
         pocket_instance.archive(item_id=item_id).commit()
     return item_id
@@ -502,6 +519,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def webhook_update(update: WebhookUpdate, context: CustomContext) -> None:
+    influxdb.write('bot', 'registration_callback', 1)
     chat_member: TelegramChatMember = await context.bot.get_chat_member(chat_id=update.user_id, user_id=update.user_id)
     telegram_user: TelegramUser = chat_member.user
     log.debug(f'Incoming oauth callback for Telegram user ID {update.user_id}.')
@@ -513,32 +531,23 @@ async def webhook_update(update: WebhookUpdate, context: CustomContext) -> None:
     elif db_user.pocket_request_token is None:
         log.warning(f'Missing stored pocket request token for Telegram user ID {update.user_id}.')
     else:
-        if db_user.pocket_access_token is None:
-            log.info(f'Completing registration for Telegram user ID {update.user_id}. Fetching user access token.')
-            get_credentials_backoff_secs = 1
-            while True:
-                try:
-                    # work around inevitable race condition in Pocket
-                    threads.interruptable_sleep.wait(get_credentials_backoff_secs)
-                    user_credentials = Pocket.get_credentials(consumer_key=creds.pocket_api_consumer_key, code=db_user.pocket_request_token)
-                except PocketException as e:
-                    log.debug('Still trying to get access token for Telegram user ID {update.user_id}...'.format(repr(e)))
-                    if get_credentials_backoff_secs <= 30:
-                        # exponential backoff
-                        get_credentials_backoff_secs *= 2
-                    else:
-                        raise e
-                    continue
-                if user_credentials is not None:
-                    break
+        log.info(f'Completing registration for Telegram user ID {update.user_id}. Fetching user access token.')
+        try:
+            user_credentials = Pocket.get_credentials(consumer_key=creds.pocket_api_consumer_key, code=db_user.pocket_request_token)
+        except PocketException as e:
+            capture_exception(e)
+            log.debug(f'Pocket error to get access token for Telegram user ID {update.user_id}: {repr(e)}...', exc_info=True)
+        if user_credentials is not None:
             access_token = user_credentials['access_token']
             pocket_username = user_credentials['username']
             log.info(f'Storing Pocket username and access token for Telegram user ID {update.user_id}.')
             await store_access_token(telegram_user_id=update.user_id, pocket_username=pocket_username, pocket_access_token=access_token)
             response_message = rf'{emoji.emojize(":check_box_with_check:")} {telegram_user.first_name}, you are now authorized as Pocket user "{pocket_username}".'
+            influxdb.write('bot', 'registration_complete', 1)
         else:
-            response_message = rf'{emoji.emojize(":check_box_with_check:")} {telegram_user.first_name}, you are already authorized as Pocket user "{db_user.pocket_username}".'
-    influxdb.write('bot', 'registration_callback', 1)
+            influxdb.write('bot', 'registration_error', 1)
+            log.warning(f'No valid user credentials after registration callback for Telegram user ID {update.user_id}')
+            response_message = rf'{emoji.emojize(":stop_sign:")} {telegram_user.first_name}, there was a problem authorizing with Pocket. Please try again later?'
     if response_message is not None:
         await context.bot.send_message(
             chat_id=update.user_id,
