@@ -8,6 +8,10 @@ all: help
 help:
 	@echo "Depends on 1Password Connect Server: https://developer.1password.com/docs/connect/get-started"
 
+pydeps:
+	curl -sSL https://install.python-poetry.org | python3 -
+	@echo "In a new terminal run: poetry install"
+
 user:
 	id $(USER_ID) || (sudo useradd -r -u $(USER_ID) -g $(GROUP_ID) app && sudo usermod -a -G $(GROUP_ID) -u $(USER_ID) app)
 	mkdir -p ./data/
@@ -18,7 +22,7 @@ user:
 setup: docker-compose.template
 	@echo "Generating docker-compose.yml"
 	cat docker-compose.template | sed "s~__DOCKER_HOSTNAME__~$(DOCKER_APP)~g" > docker-compose.template2
-	python3 ./pylib/cred_tool ENV.$(APP) $(APP) | python3 ./pylib/yaml_interpol services/app/environment docker-compose.template2 > docker-compose.yml
+	poetry run python3 ./pylib/cred_tool ENV.$(APP) $(APP) | poetry run python3 ./pylib/yaml_interpol services/app/environment docker-compose.template2 > docker-compose.yml
 	rm -f docker-compose.template2
 
 build:
