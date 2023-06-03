@@ -157,7 +157,7 @@ Distributed under the MIT License. See [LICENSE](LICENSE) for more information.
 [issues-shield]: https://img.shields.io/github/issues/tailucas/pocket-lint.svg?style=for-the-badge
 [issues-url]: https://github.com/tailucas/pocket-lint/issues
 [license-shield]: https://img.shields.io/github/license/tailucas/pocket-lint.svg?style=for-the-badge
-[license-url]: https://github.com/tailucas/pocket-lint/blob/master/LICENSE
+[license-url]: https://github.com/tailucas/pocket-lint/blob/main/LICENSE
 
 [baseapp-url]: https://github.com/tailucas/base-app
 [baseapp-image-url]: https://hub.docker.com/repository/docker/tailucas/base-app/general
