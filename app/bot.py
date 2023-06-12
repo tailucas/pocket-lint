@@ -19,7 +19,11 @@ from telegram import (
     User as TelegramUser,
     ChatMember as TelegramChatMember,
 )
-from telegram.constants import ParseMode, ChatAction
+from telegram.constants import (
+    ParseMode,
+    ChatAction,
+    ChatType
+)
 from telegram.ext import (
     ContextTypes,
     ConversationHandler
@@ -290,32 +294,37 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user: TelegramUser = update.effective_user
-    db_user: User = await validate(command_name='settings', update=update)
-    if db_user is None:
-        return
-    sort_order, auto_archive = await get_prefs(db_user=db_user)
-    if auto_archive:
-        auto_archive = 'ON'
-    else:
-        auto_archive = 'OFF'
-    response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":gear:")}</tg-emoji> ' \
-        f'{user.first_name}, changing sort order (currently {sort_order} first) will reset your pick positions. ' \
-        f'Auto-archive (currently {auto_archive}) updates Pocket when picking a link to archive the item.'
-    user_keyboard = [
-        [
-            InlineKeyboardButton("Sort Newest", callback_data=ACTION_SETTINGS_SORT_NEWEST),
-            InlineKeyboardButton("Sort Oldest", callback_data=ACTION_SETTINGS_SORT_OLDEST)
-        ],
-        [
-            InlineKeyboardButton("Auto-archive on", callback_data=ACTION_SETTINGS_AUTO_ARCHIVE_ON),
-            InlineKeyboardButton("Auto-archive off", callback_data=ACTION_SETTINGS_AUTO_ARCHIVE_OFF)
-        ],
-        [
-            InlineKeyboardButton("Cancel", callback_data=str(ACTION_NONE))
+    response_message = None
+    reply_markup = None
+    if update.message.chat.type == ChatType.PRIVATE:
+        user: TelegramUser = update.effective_user
+        db_user: User = await validate(command_name='settings', update=update)
+        if db_user is None:
+            return
+        sort_order, auto_archive = await get_prefs(db_user=db_user)
+        if auto_archive:
+            auto_archive = 'ON'
+        else:
+            auto_archive = 'OFF'
+        response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":gear:")}</tg-emoji> ' \
+            f'{user.first_name}, changing sort order (currently {sort_order} first) will reset your pick positions. ' \
+            f'Auto-archive (currently {auto_archive}) updates Pocket when picking a link to archive the item.'
+        user_keyboard = [
+            [
+                InlineKeyboardButton("Sort Newest", callback_data=ACTION_SETTINGS_SORT_NEWEST),
+                InlineKeyboardButton("Sort Oldest", callback_data=ACTION_SETTINGS_SORT_OLDEST)
+            ],
+            [
+                InlineKeyboardButton("Auto-archive on", callback_data=ACTION_SETTINGS_AUTO_ARCHIVE_ON),
+                InlineKeyboardButton("Auto-archive off", callback_data=ACTION_SETTINGS_AUTO_ARCHIVE_OFF)
+            ],
+            [
+                InlineKeyboardButton("Cancel", callback_data=str(ACTION_NONE))
+            ]
         ]
-    ]
-    reply_markup = InlineKeyboardMarkup(user_keyboard)
+        reply_markup = InlineKeyboardMarkup(user_keyboard)
+    else:
+        response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":gear:")}</tg-emoji> This does not work in group chats, only in private chat.'
     await update.message.reply_html(
         text=response_message,
         reply_markup=reply_markup
@@ -332,6 +341,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     message = rf'{emoji.emojize(":light_bulb:")} {user.first_name}, the documentation is [here]({help_url}).'
     await update.message.reply_text(
         text=message,
+        # do not render the summary
+        disable_web_page_preview=True,
         parse_mode=ParseMode.MARKDOWN
     )
     return ConversationHandler.END
