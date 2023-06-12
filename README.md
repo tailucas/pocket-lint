@@ -40,7 +40,6 @@ Technologies that help make this package useful:
 [![Pocket][pocket-shield]][pocket-url]
 [![Poetry][poetry-shield]][poetry-url]
 [![Python][python-shield]][python-url]
-[![RabbitMQ][rabbit-shield]][rabbit-url]
 [![Sentry][sentry-shield]][sentry-url]
 [![SQLite][sqlite-shield]][sqlite-url]
 [![ZeroMQ][zmq-shield]][zmq-url]
@@ -181,8 +180,6 @@ Distributed under the MIT License. See [LICENSE](LICENSE) for more information.
 [poetry-shield]: https://img.shields.io/static/v1?style=for-the-badge&message=Poetry&color=60A5FA&logo=Poetry&logoColor=FFFFFF&label=
 [python-url]: https://www.python.org/
 [python-shield]: https://img.shields.io/static/v1?style=for-the-badge&message=Python&color=3776AB&logo=Python&logoColor=FFFFFF&label=
-[rabbit-url]: https://www.rabbitmq.com/
-[rabbit-shield]: https://img.shields.io/static/v1?style=for-the-badge&message=RabbitMQ&color=FF6600&logo=RabbitMQ&logoColor=FFFFFF&label=
 [sentry-url]: https://sentry.io/
 [sentry-shield]: https://img.shields.io/static/v1?style=for-the-badge&message=Sentry&color=362D59&logo=Sentry&logoColor=FFFFFF&label=
 [sqlite-url]: https://www.sqlite.org/
