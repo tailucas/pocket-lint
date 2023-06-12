@@ -10,7 +10,7 @@ help:
 
 pydeps:
 	curl -sSL https://install.python-poetry.org | python3 -
-	@echo "In a new terminal run: poetry install"
+	@echo "Now add poetry to your PATH and run 'poetry install'."
 
 user:
 	id $(USER_ID) || (sudo useradd -r -u $(USER_ID) -g $(GROUP_ID) app && sudo usermod -a -G $(GROUP_ID) -u $(USER_ID) app)
@@ -41,3 +41,4 @@ clean:
 	rm docker-compose.yml
 
 .PHONY: all help setup run connect clean pydeps
+
