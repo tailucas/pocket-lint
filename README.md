@@ -42,6 +42,7 @@ Technologies that help make this package useful:
 [![Python][python-shield]][python-url]
 [![Sentry][sentry-shield]][sentry-url]
 [![SQLite][sqlite-shield]][sqlite-url]
+[![Telegram][telegram-shield]][telegram-url]
 [![ZeroMQ][zmq-shield]][zmq-url]
 
 Also:
@@ -184,5 +185,7 @@ Distributed under the MIT License. See [LICENSE](LICENSE) for more information.
 [sentry-shield]: https://img.shields.io/static/v1?style=for-the-badge&message=Sentry&color=362D59&logo=Sentry&logoColor=FFFFFF&label=
 [sqlite-url]: https://www.sqlite.org/
 [sqlite-shield]: https://img.shields.io/static/v1?style=for-the-badge&message=SQLite&color=003B57&logo=SQLite&logoColor=FFFFFF&label=
+[telegram-url]: https://telegram.org/
+[telegram-shield]: https://img.shields.io/static/v1?style=for-the-badge&message=Telegram&color=26A5E4&logo=Telegram&logoColor=FFFFFF&label=
 [zmq-url]: https://zeromq.org/
 [zmq-shield]: https://img.shields.io/static/v1?style=for-the-badge&message=ZeroMQ&color=DF0000&logo=ZeroMQ&logoColor=FFFFFF&label=
