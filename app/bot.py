@@ -224,22 +224,23 @@ async def pick_from_pocket(db_user: User, update: Update, context: ContextTypes.
         text=response_message,
         parse_mode=ParseMode.HTML
     )
-    if user_follow_up and user_keyboard is None:
-        await update.message.reply_html(
-            text=user_follow_up,
-        )
-    elif user_keyboard is not None:
-        reply_markup = InlineKeyboardMarkup(user_keyboard)
-        await update.message.reply_html(
-            text=user_follow_up,
-            reply_markup=reply_markup
-        )
+    # display follow-up controls only for private chat
+    if user_follow_up and update.message.chat.type == ChatType.PRIVATE:
+        if user_keyboard is None:
+            await update.message.reply_html(
+                text=user_follow_up,
+            )
+        else:
+            reply_markup = InlineKeyboardMarkup(user_keyboard)
+            await update.message.reply_html(
+                text=user_follow_up,
+                reply_markup=reply_markup
+            )
     # auto-archive if not already archived
     if pick_type != PICK_TYPE_ARCHIVED and item_id and auto_archive:
         log.debug(f'Auto-archive of Pocket item {item_id} based on user-preference.')
         pocket_instance.archive(item_id=item_id).commit()
     return item_id
-
 
 
 async def validate(command_name: str, update: Update, validate_registration=True) -> User:
@@ -274,20 +275,25 @@ async def validate(command_name: str, update: Update, validate_registration=True
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user: TelegramUser = update.effective_user
-    db_user: User = await validate(command_name='start', update=update)
-    if db_user is None:
-        return
-    user_response = rf'{emoji.emojize(":check_box_with_check:")} {user.first_name}, you are authorized as Pocket user "{db_user.pocket_username}".'
-    user_keyboard = [
-        [
-            InlineKeyboardButton("Reauthorize", callback_data=str(ACTION_AUTHORIZE)),
-            InlineKeyboardButton("Cancel", callback_data=str(ACTION_NONE))
+    response_message = None
+    reply_markup = None
+    if update.message.chat.type == ChatType.PRIVATE:
+        user: TelegramUser = update.effective_user
+        db_user: User = await validate(command_name='start', update=update)
+        if db_user is None:
+            return
+        response_message = rf'{emoji.emojize(":check_box_with_check:")} {user.first_name}, you are authorized as Pocket user "{db_user.pocket_username}".'
+        user_keyboard = [
+            [
+                InlineKeyboardButton("Reauthorize", callback_data=str(ACTION_AUTHORIZE)),
+                InlineKeyboardButton("Cancel", callback_data=str(ACTION_NONE))
+            ]
         ]
-    ]
-    reply_markup = InlineKeyboardMarkup(user_keyboard)
+        reply_markup = InlineKeyboardMarkup(user_keyboard)
+    else:
+        response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":gear:")}</tg-emoji> This does not work in group chats, only in private chat.'
     await update.message.reply_html(
-        text=user_response,
+        text=response_message,
         reply_markup=reply_markup
     )
     return ConversationHandler.END
@@ -384,7 +390,7 @@ async def untagged(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     item_id = await pick_from_pocket(db_user=db_user, update=update, context=context, pick_type=PICK_TYPE_TAGGING, tag=DEFAULT_TAG_UNTAGGED)
     log.debug(f'Returned untagged Pocket item ID {item_id} for tagging context handler.')
-    if item_id is not None:
+    if item_id is not None and update.message.chat.type == ChatType.PRIVATE:
         context.user_data['pocket_item_id'] = item_id
         return ACTION_TAG
     return ConversationHandler.END
