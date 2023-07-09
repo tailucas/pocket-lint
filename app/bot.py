@@ -2,6 +2,8 @@ import emoji
 import string
 import urllib
 
+from sentry_sdk.integrations.logging import ignore_logger
+
 from pylib import (
     app_config,
     creds,
@@ -28,6 +30,9 @@ from telegram.ext import (
     ContextTypes,
     ConversationHandler
 )
+
+# Reduce Sentry noise
+ignore_logger('telegram.ext._updater')
 
 from .database import SORT_NEWEST
 from .database import SORT_OLDEST
