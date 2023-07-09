@@ -1,4 +1,4 @@
-FROM tailucas/base-app:20230217
+FROM tailucas/base-app:20230708
 # for system/site packages
 USER root
 # system setup
