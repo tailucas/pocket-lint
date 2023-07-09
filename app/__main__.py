@@ -3,7 +3,7 @@ import logging.handlers
 
 import asyncio
 import builtins
-import requests
+import ngrok
 
 # setup builtins used by pylib init
 from . import APP_NAME
@@ -15,6 +15,7 @@ class CredsConfig:
     cronitor_token: f'opitem:"cronitor" opfield:.password' = None  # type: ignore
     telegram_bot_api_token: f'opitem:"Telegram" opfield:{APP_NAME}.token' = None # type: ignore
     pocket_api_consumer_key: f'opitem:"Pocket" opfield:{APP_NAME}.consumer_key' = None # type: ignore
+    ngrok_token: f'opitem:"ngrok" opfield:{APP_NAME}.token' = None  # type: ignore
     aes_sym_key: f'opitem:"AES.{APP_NAME}" opfield:.password' = None # type: ignore
     influxdb_org: f'opitem:"InfluxDB" opfield:{influx_creds_section}.org' = None # type: ignore
     influxdb_token: f'opitem:"InfluxDB" opfield:{APP_NAME}.token' = None # type: ignore
@@ -30,11 +31,9 @@ from pylib import (
     log
 )
 
-from pylib import threads
 from pylib.threads import bye, die
 from pylib.zmq import zmq_term
 
-from requests.adapters import ConnectionError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -113,21 +112,22 @@ from .bot import (
 )
 
 
+async def create_tunnel():
+    session = await ngrok.NgrokSessionBuilder().authtoken(creds.ngrok_token).connect()
+    tunnel = await session.http_endpoint().listen()
+    tunnel.forward_tcp('localhost:8080')
+    return tunnel
+
+
 def main():
     log.setLevel(logging.INFO)
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        log.info('Discovering ngrok tunnel URL...')
-        while True:
-            try:
-                ngrok_tunnel_url = requests.get('http://127.0.0.1:4040/api/tunnels/oauth_callback').json()['public_url']
-            except (KeyError, ConnectionError) as e:
-                log.debug('Still attempting to discover ngrok tunnel URL ({})...'.format(repr(e)))
-                threads.interruptable_sleep.wait(1)
-                continue
-            log.info('External call-back URL is {}'.format(ngrok_tunnel_url))
-            break
+        log.info('Starting ngrok tunnel...')
+        ngrok_tunnel = loop.run_until_complete(create_tunnel())
+        ngrok_tunnel_url = ngrok_tunnel.url()
+        log.info(f'External call-back URL is {ngrok_tunnel_url}')
         loop.run_until_complete(db_startup())
         """Start the bot."""
         # Create the Application and pass it your bot's token.
@@ -201,9 +201,9 @@ def main():
         webserver = CustomServer(
             config=ServerConfig(
                 app=starlette_app,
-                port=8080,
+                host='localhost',
+                port='8080',
                 use_colors=False,
-                host="127.0.0.1",
             )
         )
         log.info('Starting web server...')
@@ -217,6 +217,9 @@ def main():
     finally:
         die()
         zmq_term()
+        log.info('Shutting down ngrok...')
+        ngrok.kill()
+        log.info('ngrok shut down...')
         loop.close()
     bye()
 
