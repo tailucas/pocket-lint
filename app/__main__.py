@@ -115,7 +115,8 @@ from .bot import (
 async def create_tunnel():
     session = await ngrok.NgrokSessionBuilder().authtoken(creds.ngrok_token).connect()
     tunnel = await session.http_endpoint().listen()
-    tunnel.forward_tcp('localhost:8080')
+    tunnel_port = app_config.get('tunnel', 'port_number')
+    tunnel.forward_tcp(f'localhost:{tunnel_port}')
     return tunnel
 
 
@@ -202,7 +203,7 @@ def main():
             config=ServerConfig(
                 app=starlette_app,
                 host='localhost',
-                port='8080',
+                port=app_config.get('tunnel', 'port_number'),
                 use_colors=False,
             )
         )
