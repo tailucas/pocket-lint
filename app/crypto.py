@@ -1,4 +1,4 @@
-from pylib import (
+from tailucas_pylib import (
     creds,
     log
 )

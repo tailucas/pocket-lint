@@ -1,0 +1,87 @@
+#!/usr/bin/env python
+import json
+import os
+import sys
+
+import onepasswordconnectsdk as OP
+from onepasswordconnectsdk.config import ConfigurationError
+from onepasswordconnectsdk.client import (
+    Client,
+    new_client_from_environment,
+    FailedToRetrieveItemException
+)
+
+
+def out(msg, code=None):
+    sys.stdout.write(msg)
+    if code:
+        exit(int(code))
+
+
+def err(msg, code=1):
+    sys.stderr.write(msg + '\n')
+    exit(code)
+
+
+try:
+    op_connect_server = os.environ['OP_CONNECT_SERVER']
+except KeyError:
+    default_op_connect_server = 'http://localhost:8080'
+    op_connect_server = default_op_connect_server
+
+
+creds_client: Client = new_client_from_environment(url=op_connect_server)
+creds_vaults = creds_client.get_vaults()
+vault_id = None
+if len(creds_vaults) == 1:
+    vault_id = creds_vaults[0].id
+elif len(creds_vaults) > 1:
+    # disambiguate
+    vault_id = os.environ['OP_VAULT']
+
+
+if __name__ == "__main__":
+    argc = len(sys.argv)
+    item_name = None
+    if argc == 3:
+        item_name = sys.argv[1]
+        section_name = sys.argv[2]
+    elif argc == 1:
+        cred_schema = json.loads(sys.stdin.readline())
+    else:
+        err(f'Unexpected arguments in {sys.argv[1:]}')
+    creds_client: Client = new_client_from_environment(url=op_connect_server)
+    if item_name is None:
+        if (len(cred_schema) > 1):
+            err(f'Only a single credential specification supported. {list(cred_schema)} provided.')
+        key_field = list(cred_schema)[0]
+        try:
+            creds = OP.load_dict(client=creds_client, config=cred_schema)
+        except ConfigurationError as e:
+            err(f'{e!s}')
+        if key_field not in creds:
+            err(f'Expected [{key_field}] field in server response.')
+        out(msg=creds[key_field], code=0)
+    else:
+        try:
+            item_summary = creds_client.get_item_by_title(item_name, vault_id)
+        except FailedToRetrieveItemException as e:
+            err(f'{e!s}')
+        item = creds_client.get_item(item_summary.id, vault_id)
+        section_id = None
+        for section in item.sections:
+            if section.label == section_name:
+                section_id = section.id
+                break
+        if section_id is None:
+            err(f'No section {section_name} found.')
+        key_value_pairs = dict()
+        for field in item.fields:
+            if field.purpose:
+                # skip default fields
+                continue
+            if field.section and field.section.id != section_id:
+                # only include fields from this section
+                continue
+            key_value_pairs[field.label] = field.value
+        out(json.dumps(key_value_pairs))

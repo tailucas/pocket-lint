@@ -4,7 +4,7 @@ import urllib
 
 from sentry_sdk.integrations.logging import ignore_logger
 
-from pylib import (
+from tailucas_pylib import (
     app_config,
     creds,
     log,

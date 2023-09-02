@@ -1,6 +1,6 @@
 from . import APP_NAME
 
-from pylib import (
+from tailucas_pylib import (
     app_config,
     creds,
     device_name_base,

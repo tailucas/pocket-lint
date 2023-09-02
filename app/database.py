@@ -1,6 +1,6 @@
 import asyncio
 
-from pylib import (
+from tailucas_pylib import (
     app_config,
     log
 )

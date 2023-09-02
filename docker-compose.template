@@ -2,7 +2,10 @@ version: "3.8"
 services:
   app:
     image: "tailucas/pocket-lint"
-    build: .
+    build:
+      context: .
+      args:
+        FOO: bar
     network_mode: "host"
     restart: unless-stopped
     logging:
