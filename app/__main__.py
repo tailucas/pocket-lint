@@ -111,6 +111,11 @@ from .bot import (
     telegram_error_handler
 )
 
+from sentry_sdk.integrations.logging import ignore_logger
+# Reduce Sentry noise
+ignore_logger('telegram.ext.Updater')
+ignore_logger('telegram.ext._updater')
+
 
 async def create_tunnel():
     session = await ngrok.NgrokSessionBuilder().authtoken(creds.ngrok_token).connect()
@@ -219,7 +224,10 @@ def main():
         die()
         zmq_term()
         log.info('Shutting down ngrok...')
-        ngrok.kill()
+        try:
+            ngrok.kill()
+        except ValueError:
+            log.warning('ngrok shutdown issue.', exc_info=True)
         log.info('ngrok shut down...')
         loop.close()
     bye()
