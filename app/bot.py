@@ -140,32 +140,42 @@ async def pick_from_pocket(db_user: User, update: Update, context: ContextTypes.
         status: str = None
         # extract and log headers
         if len(items) == 2:
-            h: dict = items[1]
-            log.debug(f'Pocket response headers ({len(h)}): {h.keys()}')
-            source = h['X-Source']
-            status = h['Status']
-            server = h['Server']
-            cache = h['X-Cache']
-            cdn_pop = h['X-Amz-Cf-Pop']
-            limit_user = None
-            if 'X-Limit-User-Limit' in h.keys():
-                limit_user = h['X-Limit-User-Limit']
-            limit_user_remain = None
-            if 'X-Limit-User-Remaining' in h.keys():
-                limit_user_remain = h['X-Limit-User-Remaining']
-            limit_user_reset = None
-            if 'X-Limit-User-Reset' in h.keys():
-                limit_user_reset = h['X-Limit-User-Reset']
-            limit_key = h['X-Limit-Key-Limit']
-            limit_key_remain = h['X-Limit-Key-Remaining']
-            limit_key_reset = h['X-Limit-Key-Reset']
-            log.info(f'{status} from {source} served by {server} ({cache} via {cdn_pop}). ' \
-                        f'User limits: {limit_user_remain} of {limit_user} (resets {limit_user_reset}). ' \
-                        f'Key limits: {limit_key_remain} of {limit_key} (resets {limit_key_reset}).')
-            for k,v in h.items():
-                if k.startswith('X-Limit'):
-                    influxdb.write(point_name='pocket', field_name=k, field_value=int(v))
-        if status.startswith('200'):
+            try:
+                h: dict = items[1]
+                log.debug(f'Pocket response headers ({len(h)}): {h.keys()}')
+                source = h['X-Source']
+                if 'Status' in h.keys():
+                    status = h['Status']
+                server = h['Server']
+                cache = h['X-Cache']
+                cdn_pop = h['X-Amz-Cf-Pop']
+                limit_user = None
+                if 'X-Limit-User-Limit' in h.keys():
+                    limit_user = h['X-Limit-User-Limit']
+                limit_user_remain = None
+                if 'X-Limit-User-Remaining' in h.keys():
+                    limit_user_remain = h['X-Limit-User-Remaining']
+                limit_user_reset = None
+                if 'X-Limit-User-Reset' in h.keys():
+                    limit_user_reset = h['X-Limit-User-Reset']
+                limit_key = None
+                if 'X-Limit-Key-Limit' in h.keys():
+                    limit_key = h['X-Limit-Key-Limit']
+                limit_key_remain = None
+                if 'X-Limit-Key-Remaining' in h.keys():
+                    limit_key_remain = h['X-Limit-Key-Remaining']
+                limit_key_reset = None
+                if 'X-Limit-Key-Reset' in h.keys():
+                    limit_key_reset = h['X-Limit-Key-Reset']
+                log.info(f'{status=} from {source} served by {server} ({cache} via {cdn_pop}). ' \
+                            f'User limits: {limit_user_remain} of {limit_user} (resets {limit_user_reset}). ' \
+                            f'Key limits: {limit_key_remain} of {limit_key} (resets {limit_key_reset}).')
+                for k,v in h.items():
+                    if k.startswith('X-Limit'):
+                        influxdb.write(point_name='pocket', field_name=k, field_value=int(v))
+            except KeyError as e:
+                log.exception(f'Problem inspecting response headers. Available headers: {h.keys()!s}')
+        if status is None or status.startswith('200'):
             if len(items) == 0 or len(items[0]['list']) == 0:
                 response_message = rf'<tg-emoji emoji-id="1">{emoji.emojize(":floppy_disk:")}</tg-emoji> No links found, sorry.'
                 if offset > 0:

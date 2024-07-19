@@ -1,2 +1,2 @@
 */5 * * * * /opt/app/backup_db.sh
-2 0 * * * /opt/app/backup_db.sh "$(date +%y%m%d)"
+2 0 * * * /opt/app/backup_db.sh date

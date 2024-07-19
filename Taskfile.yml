@@ -1,0 +1,91 @@
+# https://taskfile.dev
+
+version: '3'
+
+includes:
+  taskfile: ./app.yml
+
+vars:
+  USER_ID: 999
+  GROUP_ID: 999
+
+dotenv: ['.env']
+
+tasks:
+  default:
+    cmds:
+      - task: build
+  datadir:
+    desc: Create system user and associate with docker group.
+    cmds:
+      - mkdir -p ./data/
+      - sudo chown {{.USER_ID}}:{{.GROUP_ID}} ./data/
+      - sudo chmod 755 ./data/
+      - sudo chmod g+rws ./data/
+      - sudo rm -f ./data/app-std* ./data/cron-std* ./data/supervisor.sock
+  create-dot-env:
+    desc: Dump container environment to local file.
+    preconditions:
+      - poetry -V
+      - python -V
+      - python3 -V
+      - test -f cred_tool
+      - test -n "$(docker ps | grep op-connect-api)"
+    cmds:
+      - rm -f .env
+      - echo 'DOCKER_IMAGE="{{.PROJECT_NAME}}"' >> .env
+      - poetry run python ./cred_tool ENV.{{.PROJECT_NAME}} {{.PROJECT_NAME}} build | jq -r '. | to_entries[] | [.key,.value] | @tsv' | tr '\t' '=' | sed 's/=\(.*\)/="\1"/' >> .env
+  docker:
+    deps: [create-dot-env]
+    desc: Generate a usable docker-compose.yml for Docker build.
+    preconditions:
+      - poetry -V
+      - python -V
+      - python3 -V
+      - test -f yaml_interpol
+      - test -f docker-compose.template
+    cmds:
+      - rm -f docker-compose.yml
+      - cp docker-compose.template docker-compose.yml
+    generates:
+      - docker-compose.yml
+  push:
+    deps: [build]
+    desc: Push built image to Docker Hub
+    preconditions:
+      - docker compose images
+    cmds:
+      - docker compose push
+  build:
+    deps: [docker]
+    desc: Clean up volume directory and build container image.
+    preconditions:
+      - docker compose -v
+    env:
+      D_LANG: "{{.LANG}}"
+      D_LANGUAGE: "{{.LANGUAGE}}"
+      D_LC_ALL: "{{.LC_ALL}}"
+    cmds:
+      - docker compose build --progress plain
+  run:
+    deps: [build, datadir]
+    desc: Run docker container
+    preconditions:
+      - docker -v
+      - test -f docker-compose.yml
+      - docker ps | grep 1password
+      - test -d ./data/
+    cmds:
+      - docker compose up
+  rund:
+    deps: [build, datadir]
+    desc: Run docker container and detach
+    preconditions:
+      - docker -v
+      - test -f docker-compose.yml
+      - docker ps | grep 1password
+      - test -d ./data/
+    cmds:
+      - docker compose up -d
+  connect:
+    cmd: ./connect_to_app.sh {{.DOCKER_APP}}

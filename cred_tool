@@ -23,34 +23,27 @@ def err(msg, code=1):
     exit(code)
 
 
-try:
-    op_connect_server = os.environ['OP_CONNECT_SERVER']
-except KeyError:
-    default_op_connect_server = 'http://localhost:8080'
-    op_connect_server = default_op_connect_server
-
-
-creds_client: Client = new_client_from_environment(url=op_connect_server)
+creds_client: Client = new_client_from_environment()
 creds_vaults = creds_client.get_vaults()
-vault_id = None
-if len(creds_vaults) == 1:
-    vault_id = creds_vaults[0].id
-elif len(creds_vaults) > 1:
-    # disambiguate
-    vault_id = os.environ['OP_VAULT']
+vault_id = os.environ['OP_VAULT']
+vault_match = False
+for creds_vault in creds_vaults:
+    if creds_vault.id == vault_id:
+        vault_match = True
+if not vault_match:
+    err(f'No vault found matching ID {vault_id}')
 
 
 if __name__ == "__main__":
     argc = len(sys.argv)
     item_name = None
-    if argc == 3:
+    if argc >= 3:
         item_name = sys.argv[1]
-        section_name = sys.argv[2]
+        section_names = sys.argv[2:]
     elif argc == 1:
         cred_schema = json.loads(sys.stdin.readline())
     else:
         err(f'Unexpected arguments in {sys.argv[1:]}')
-    creds_client: Client = new_client_from_environment(url=op_connect_server)
     if item_name is None:
         if (len(cred_schema) > 1):
             err(f'Only a single credential specification supported. {list(cred_schema)} provided.')
@@ -63,25 +56,28 @@ if __name__ == "__main__":
             err(f'Expected [{key_field}] field in server response.')
         out(msg=creds[key_field], code=0)
     else:
-        try:
-            item_summary = creds_client.get_item_by_title(item_name, vault_id)
-        except FailedToRetrieveItemException as e:
-            err(f'{e!s}')
-        item = creds_client.get_item(item_summary.id, vault_id)
-        section_id = None
-        for section in item.sections:
-            if section.label == section_name:
-                section_id = section.id
-                break
-        if section_id is None:
-            err(f'No section {section_name} found.')
         key_value_pairs = dict()
-        for field in item.fields:
-            if field.purpose:
-                # skip default fields
-                continue
-            if field.section and field.section.id != section_id:
-                # only include fields from this section
-                continue
-            key_value_pairs[field.label] = field.value
+        for section_name in section_names:
+            try:
+                item_summary = creds_client.get_item_by_title(item_name, vault_id)
+            except FailedToRetrieveItemException as e:
+                err(f'{e!s}')
+            item = creds_client.get_item(item_summary.id, vault_id)
+            section_id = None
+            for section in item.sections:
+                if section.label == section_name:
+                    section_id = section.id
+                    break
+            if section_id is None:
+                err(f'No section {section_name} found.')
+            for field in item.fields:
+                if field.purpose:
+                    # skip default fields
+                    continue
+                if field.section and field.section.id != section_id:
+                    # only include fields from this section
+                    continue
+                if field.label in key_value_pairs:
+                    err(f'{field.label} ({field.value}) already present from another section.')
+                key_value_pairs[field.label] = field.value
         out(json.dumps(key_value_pairs))

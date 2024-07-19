@@ -1,4 +1,7 @@
 import asyncio
+from os import path
+
+from . import APP_NAME
 
 from tailucas_pylib import (
     app_config,
@@ -10,7 +13,8 @@ from .crypto import encrypt, decrypt, digest
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
-db_tablespace = app_config.get('sqlite', 'tablespace_path')
+db_tablespace_path = app_config.get('sqlite', 'tablespace_path')
+db_tablespace = path.join(f'{db_tablespace_path}', f'{APP_NAME}.db')
 dburl = f'sqlite+aiosqlite:///{db_tablespace}'
 engine = create_async_engine(dburl)
 async_session = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)

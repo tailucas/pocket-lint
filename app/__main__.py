@@ -208,7 +208,7 @@ def main():
             config=ServerConfig(
                 app=starlette_app,
                 host='localhost',
-                port=app_config.get('tunnel', 'port_number'),
+                port=app_config.getint('tunnel', 'port_number'),
                 use_colors=False,
             )
         )
@@ -218,7 +218,10 @@ def main():
         log.info('Starting Telegram Bot...')
         application.run_polling()
         log.info('Shutting down...')
-        webserver.shutdown()
+        # emulate signal handler latch in server.handle_exit()
+        webserver.should_exit = True
+        webserver.force_exit = True
+        asyncio.run(webserver.shutdown())
         log.info('Web server shut down...')
     finally:
         die()

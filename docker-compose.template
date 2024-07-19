@@ -1,20 +1,27 @@
-version: "3.8"
 services:
   app:
-    image: "tailucas/pocket-lint"
+    env_file:
+      - .env
+    image: "${DOCKER_IMAGE}"
+    restart: unless-stopped
+    stop_grace_period: 45s
     build:
       context: .
       args:
-        FOO: bar
+        ENCODING: "${ENCODING}"
+        LANG: "${D_LANG}"
+        LANGUAGE: "${D_LANGUAGE}"
+        LC_ALL: "${D_LC_ALL}"
     network_mode: "host"
-    restart: unless-stopped
     logging:
       driver: syslog
+      options:
+        syslog-address: "${SYSLOG_ADDRESS}"
+        syslog-format: "rfc3164"
+        tag: "${DEVICE_NAME}"
     tmpfs:
     - /tmp
-    hostname: __DOCKER_HOSTNAME__
+    hostname: ${DEVICE_NAME}
     volumes:
       - ./data:/data
       - /dev/log:/dev/log
-    environment:
-      FLASK_ENV: development

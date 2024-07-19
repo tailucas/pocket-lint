@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "pocketlint"
+name = "app"
 version = "0.1.0"
 description = "Telegram bot to retrieve items from https://getpocket.com/"
 authors = ["Tai Lucas <tglucas@gmail.com>"]
@@ -10,21 +10,22 @@ readme = "README.md"
 app = "app.__main__:main"
 
 [tool.poetry.dependencies]
-python = "^3.10"
+python = "^3.11"
 awscli = "^1.27.69"
 pocket = "^0.3.6"
-sentry-sdk = "^1.15.0"
+sentry-sdk = "^2.10.0"
 simplejson = "^3.18.3"
 sqlalchemy = {extras = ["asyncio"], version = "^2.0.11"}
 pycryptodome = "^3.17"
 aiosqlite = "^0.19.0"
 starlette = "^0.28.0"
 uvicorn = "^0.22.0"
-python-telegram-bot = "^20.2"
 emoji = "^2.2.0"
 influxdb-client = "^1.36.1"
 ngrok = "^0.8.1"
-tailucas-pylib = "^0.0.1"
+tailucas-pylib = "^0.4.2"
+onepasswordconnectsdk = {git = "https://github.com/tglucas/connect-sdk-python.git"}
+python-telegram-bot = "^21.4"
 
 [build-system]
 requires = ["poetry-core"]

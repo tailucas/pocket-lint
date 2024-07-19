@@ -3,5 +3,5 @@ set -eu
 
 # Refresh local SQLite if not exists
 if [ ! -f "${TABLESPACE_PATH}" ]; then
-  /opt/app/backup_db.sh
+  /opt/app/backup_db.sh time
 fi
