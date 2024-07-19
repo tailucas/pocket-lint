@@ -8,5 +8,11 @@
         }
     },
     "workspaceFolder": "${localWorkspaceFolder}",
-    "workspaceMount": "source=${localWorkspaceFolder},target=${localWorkspaceFolder},type=bind"
+    "workspaceMount": "source=${localWorkspaceFolder},target=${localWorkspaceFolder},type=bind",
+    "containerEnv": {
+        "OP_CONNECT_HOST": "${localEnv:OP_CONNECT_HOST}",
+        "OP_CONNECT_TOKEN": "${localEnv:OP_CONNECT_TOKEN}",
+        "OP_VAULT": "${localEnv:OP_VAULT}"
+    },
+    "runArgs": ["--network=host"]
 }
