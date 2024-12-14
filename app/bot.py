@@ -146,7 +146,9 @@ async def pick_from_pocket(db_user: User, update: Update, context: ContextTypes.
                 source = h['X-Source']
                 if 'Status' in h.keys():
                     status = h['Status']
-                server = h['Server']
+                server = 'unknown'
+                if 'Server' in h.keys():
+                    server = h['Server']
                 cache = h['X-Cache']
                 cdn_pop = h['X-Amz-Cf-Pop']
                 limit_user = None
