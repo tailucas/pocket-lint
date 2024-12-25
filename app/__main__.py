@@ -126,7 +126,6 @@ async def create_tunnel():
 
 
 def main():
-    log.setLevel(logging.INFO)
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
